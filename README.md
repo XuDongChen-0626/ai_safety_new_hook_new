@@ -76,8 +76,9 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 
 ## 编译 / 烧录 / OTA
 
-首次拉取后初始化子模块（`module/` 与 `tool/zephyr-dev-workflow` 已随工程提供，
-如使用 git 版本可执行）：
+`module/`（system_health / time_manager / ota_manager / fault_dump）与
+`tool/zephyr-dev-workflow` 登记为 git 子模块（HKCRC 上游仓库，提交号固定在
+gitlink 中，`.gitmodules` 只给出仓库地址）。克隆本工程后先初始化子模块：
 
 ```powershell
 git submodule update --init --recursive
@@ -255,9 +256,8 @@ tool/       开发工作流脚本
    建立 BBRAM 信任记录；无定位时 RTC 保持“不可信”，定时关机与硬待机不会执行
    （安全优先；旧固件在无定位时也会写入 RTC）。
 10. **组件来源**：`module/`（system_health / time_manager / ota_manager /
-    fault_dump）与 `tool/zephyr-dev-workflow` 是 HKCRC 上游仓库的本地副本
-    （vendored，便于离线构建）；若需跟随上游，可改回 git submodule 并保留
-    相同的目录路径。
-    本工程目录当前还不是 git 仓库，因此没有 `.gitmodules`；各依赖对应的上游
-    地址、提交号，以及“转换为真正的子模块”的完整步骤（含离线做法）见
+    fault_dump）与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**
+    （`.gitmodules` + gitlink，提交号与参考工程 `craner_ai_safety_car` 一致），
+    子模块 git 仓库位于 `.git/modules/...`，工作副本可直接离线编译。
+    各依赖的上游地址、固定提交号，以及离线转换成子模块的完整步骤见
     [docs/依赖与子模块管理.md](docs/依赖与子模块管理.md)。
