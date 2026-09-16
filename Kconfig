@@ -1,0 +1,159 @@
+source "Kconfig.zephyr"
+
+rsource "module/system_health_service/Kconfig"
+rsource "module/time_manager_service/Kconfig"
+rsource "module/ota_manager_service/Kconfig"
+rsource "module/fault_dump_service/Kconfig"
+
+menu "Craner AI safety hook application"
+
+config HOOK_MODBUS_SLAVE_ID
+	int "Modbus RTU slave address on the host RS485 bus (uart8)"
+	default 1
+	range 1 247
+	help
+	  The hook controller is a Modbus RTU slave for the crane host
+	  controller (上位机). The old firmware used FORWARD_SLAVE_ADDR = 1.
+
+config HOOK_4G_ENABLE
+	bool "4G / cloud channel (usr.cn transparent module on usart1)"
+	default y
+	help
+	  Enables the usr.cn transparent bridge handling, the craner#AT command
+	  surface and the binary 0xA5 cloud protocol.
+
+config HOOK_GPS_ENABLE
+	bool "GPS NMEA time source on usart3"
+	default y
+	help
+	  Parse NMEA RMC sentences with component/nmea and use them to set the
+	  internal RTC once per boot.
+
+config HOOK_HARD_STANDBY_ENABLE
+	bool "Allow STM32 hard standby (RTC alarm B wakeup)"
+	default y
+	help
+	  When enabled, the RTC power schedule may put the MCU into STM32
+	  STANDBY and wake it up with RTC alarm B at the configured power-on
+	  time. Requires a trusted RTC time (GPS sync or host calibration).
+
+config HOOK_HEARTBEAT_RELAY_ENABLE
+	bool "Host heartbeat supervision relay"
+	default y
+	help
+	  Drives FLASH_LIGHT_POWER_EN/PWD_LED from the host heartbeat register
+	  (register 104). Silence >10 s clears the alarm outputs, silence
+	  >60 s cuts the relay.
+
+config HOOK_ALARM_MODULE_ENABLE
+	bool "External sound & light alarm module on uart7"
+	default y
+
+config HOOK_BMS_ENABLE
+	bool "Battery management system (BMS) polling on usart6"
+	default y
+
+config HOOK_HEARTBEAT_SILENCE_MS
+	int "Host heartbeat silence timeout in milliseconds"
+	default 10000
+	range 1000 600000
+	help
+	  After this silence the LED/buzzer commands are cleared.
+
+config HOOK_HEARTBEAT_TIMEOUT_MS
+	int "Host heartbeat power-off timeout in milliseconds"
+	default 60000
+	range 1000 3600000
+	help
+	  After this silence the relay (FLASH_LIGHT_POWER_EN/PWD_LED) is turned
+	  off and ERR_HEARTBEAT_TIMEOUT is set in the error code register.
+
+config HOOK_LOW_BATTERY_THRESHOLD
+	int "Low battery warning threshold"
+	default 2000
+	range 0 10000
+	help
+	  Battery level register value below which the work mode becomes
+	  MODE_LOW_BATTERY (2).
+
+config HOOK_DEFAULT_ALARM_VOLUME
+	int "Default sound & light module volume"
+	default 30
+	range 0 31
+
+config HOOK_POWER_ON_TIME_HHMM
+	int "Default daily power-on time (Beijing, high byte hour / low byte minute)"
+	default 1536
+	range 0 65535
+	help
+	  0x0600 = 06:00 (same default as the old firmware).
+
+config HOOK_POWER_OFF_TIME_HHMM
+	int "Default daily power-off time (Beijing, high byte hour / low byte minute)"
+	default 5376
+	range 0 65535
+	help
+	  0x1500 = 21:00 (same default as the old firmware).
+
+config HOOK_4G_KEEPALIVE_PERIOD_S
+	int "4G module keepalive period in seconds"
+	default 3600
+	range 60 86400
+	help
+	  Period of the periodic "usr.cn#AT+Z" keepalive that keeps the usr.cn
+	  transparent link to the MQTT broker alive (the old firmware sent it
+	  once per hour).
+
+config HOOK_OTA_ENABLE
+	bool "MQTT + Ymodem OTA into the MCUboot secondary slot"
+	default y
+	select IMG_MANAGER
+	help
+	  Receive a firmware image from the cloud/host tool over the usr.cn "2,"
+	  channel with Ymodem, stream it into the MCUboot slot1 partition and
+	  arm a test upgrade (boot_request_upgrade). MCUboot validates the
+	  signature, swaps the slots and rolls back unless the new image is
+	  confirmed (AT+OTALOCK, "hook ota confirm" or the auto-confirm timer).
+
+config HOOK_OTA_PACKET_TIMEOUT_MS
+	int "Ymodem per-packet timeout in milliseconds"
+	default 30000
+	range 1000 300000
+	depends on HOOK_OTA_ENABLE
+	help
+	  Time without a completed packet before the receiver NAKs and, after
+	  HOOK_OTA_MAX_ERRORS retries, aborts the transfer. Keep it above the
+	  worst case flash sector erase time (~4 s) plus link latency.
+
+config HOOK_OTA_MAX_ERRORS
+	int "Maximum consecutive Ymodem errors"
+	default 10
+	range 1 100
+	depends on HOOK_OTA_ENABLE
+
+config HOOK_OTA_CRC_REQUEST_INTERVAL_MS
+	int "Interval of the Ymodem 'C' keepalive in milliseconds"
+	default 1000
+	range 100 60000
+	depends on HOOK_OTA_ENABLE
+	help
+	  The host tool waits for 'C' before block 0 and again before the data
+	  blocks, so the receiver re-sends 'C' while it has no complete packet.
+
+config HOOK_OTA_SESSION_TIMEOUT_MS
+	int "OTA session inactivity timeout in milliseconds"
+	default 600000
+	range 10000 3600000
+	depends on HOOK_OTA_ENABLE
+
+config HOOK_OTA_REBOOT_DELAY_MS
+	int "Delay between staging the image and rebooting in milliseconds"
+	default 2000
+	range 0 60000
+	depends on HOOK_OTA_ENABLE
+	help
+	  Time for the 'DONE' progress message to reach the cloud before the
+	  device resets so that MCUboot can install slot1.
+
+
+endmenu
