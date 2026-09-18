@@ -12,6 +12,7 @@
 #include "board.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
 #include "system_health_service.h"
@@ -58,6 +59,21 @@ LOG_MODULE_REGISTER(hook_health, CONFIG_LOG_DEFAULT_LEVEL);
  * boundary is not flagged.
  */
 #define HOOK_HEALTH_HOST_TIMEOUT_MS (HEARTBEAT_TIMEOUT_MS + 5000U)
+/* Offline-log category of each field event (the SD card keeps the history). */
+static enum offline_log_category hook_health_log_category(uint16_t event)
+{
+	switch (event) {
+	case HOOK_HEALTH_EVENT_BMS:
+		return OFFLINE_LOG_CAT_BMS;
+	case HOOK_HEALTH_EVENT_ALARM:
+		return OFFLINE_LOG_CAT_ALARM;
+	case HOOK_HEALTH_EVENT_HOST_HEARTBEAT:
+		return OFFLINE_LOG_CAT_NETWORK;
+	default:
+		return OFFLINE_LOG_CAT_SYSTEM;
+	}
+}
+
 /*
  * The two callbacks below are the single owner of the device error bits in the
  * error-code register: a device is offline exactly when the service says so
@@ -70,6 +86,12 @@ static void hook_health_offline_first(const struct sys_health_event_status *st)
 {
 	LOG_WRN("field device %s offline after %u ms", st->name,
 		st->offline_timeout_ms);
+
+	(void)offline_log_event(hook_health_log_category(st->event),
+				OFFLINE_LOG_LEVEL_WRN,
+				"field device %s offline (timeout %u ms, "
+				"actions 0x%08x)",
+				st->name, st->offline_timeout_ms, st->action_mask);
 
 	switch (st->event) {
 	case HOOK_HEALTH_EVENT_BMS:
@@ -89,6 +111,11 @@ static void hook_health_offline_first(const struct sys_health_event_status *st)
 static void hook_health_online_first(const struct sys_health_event_status *st)
 {
 	LOG_INF("field device %s online again", st->name);
+
+	(void)offline_log_event(hook_health_log_category(st->event),
+				OFFLINE_LOG_LEVEL_INF,
+				"field device %s online again (offline for %u ms)",
+				st->name, st->last_offline_duration_ms);
 
 	switch (st->event) {
 	case HOOK_HEALTH_EVENT_BMS:
@@ -167,6 +194,10 @@ static const uint16_t hook_health_standby_paused_events[] = {
 
 static atomic_t hook_health_alive_mask;
 static bool hook_health_ota_active;
+/* True while the alarm supply is cut because of a host heartbeat timeout.
+ * Written by app/hook_heartbeat, read by app/hook_rtc (soft standby).
+ */
+static volatile bool hook_health_alarm_supply_cut;
 
 void hook_health_task_alive(uint32_t mask)
 {
@@ -186,6 +217,16 @@ void hook_health_sleep_update(bool sleeping)
 		if (sleeping) {
 			sys_health_event_disable(event);
 		} else {
+			/*
+			 * A heartbeat timeout before the standby left the
+			 * alarm detection parked: its supply is still cut, so
+			 * keep it parked until the host heartbeat comes back
+			 * (hook_health_alarm_supply_restored()).
+			 */
+			if ((event == HOOK_HEALTH_EVENT_ALARM) &&
+			    hook_health_alarm_supply_cut) {
+				continue;
+			}
 			sys_health_event_enable(event);
 			sys_health_event_report(event);
 		}
@@ -193,6 +234,50 @@ void hook_health_sleep_update(bool sleeping)
 
 	LOG_INF("alarm/heartbeat health events %s (BMS supervision stays active)",
 		sleeping ? "disabled for soft standby" : "enabled");
+}
+
+void hook_health_alarm_supply_lost(void)
+{
+	if (hook_health_alarm_supply_cut) {
+		return;
+	}
+
+	hook_health_alarm_supply_cut = true;
+
+	/*
+	 * Report the module offline with the real reason and park its offline
+	 * detection in the same step: with the supply cut the module can never
+	 * answer, so the regular 15 s "no answer" timeout would only repeat
+	 * the same conclusion later, with a misleading cause.
+	 */
+	hook_reg_set_error_bits(ERR_LED_OFFLINE);
+	sys_health_event_disable(HOOK_HEALTH_EVENT_ALARM);
+
+	LOG_WRN("alarm module offline: host heartbeat timeout, supply cut");
+	(void)offline_log_event(
+		OFFLINE_LOG_CAT_ALARM, OFFLINE_LOG_LEVEL_WRN,
+		"alarm module offline: host heartbeat timeout (%u ms), supply cut",
+		(uint32_t)HEARTBEAT_TIMEOUT_MS);
+}
+
+void hook_health_alarm_supply_restored(void)
+{
+	if (!hook_health_alarm_supply_cut) {
+		return;
+	}
+
+	hook_health_alarm_supply_cut = false;
+
+	/* sys_health_event_enable() restarts the 15 s window from now, so the
+	 * first exchange with the re-powered module is expected immediately.
+	 */
+	sys_health_event_enable(HOOK_HEALTH_EVENT_ALARM);
+	hook_reg_clear_error_bits(ERR_LED_OFFLINE);
+
+	LOG_INF("alarm module supervision resumed (host heartbeat back)");
+	(void)offline_log_event(
+		OFFLINE_LOG_CAT_ALARM, OFFLINE_LOG_LEVEL_INF,
+		"alarm module supervision resumed, host heartbeat back");
 }
 
 void hook_health_ota_gate(bool active)

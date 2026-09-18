@@ -20,12 +20,14 @@
 #include "hook_at.h"
 #include "hook_4g.h"
 #include "hook_ota.h"
+#include "hook_params.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "hook_heartbeat.h"
 #include "hook_rtc.h"
 #include "ota_manager_service.h"
 #include "system_def.h"
+#include "time_manager_service.h"
 #include "uart_manage_port.h"
 
 #define HOOK_SHELL_RTC DEVICE_DT_GET(DT_NODELABEL(rtc))
@@ -42,6 +44,8 @@ static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "work mode      : %u (1 normal, 2 standby, 3 error)",
 		    hook_reg_input_get(STATUS_WORK_MODE));
+	shell_print(sh, "device         : %s (device.no=\"%s\")",
+		    hook_params_device_tag(), hook_params_device_no());
 	shell_print(sh, "error code     : 0x%02X",
 		    hook_reg_input_get(REG_ERROR_CODE));
 	shell_print(sh, "alarm power    : %s",
@@ -88,6 +92,57 @@ static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 		    RTC_CAL_YEAR, hook_reg_get(RTC_CAL_YEAR),
 		    RTC_CAL_MONTH_DAY, hook_reg_get(RTC_CAL_MONTH_DAY),
 		    RTC_CAL_HHMM, hook_reg_get(RTC_CAL_HHMM));
+
+	return 0;
+}
+
+/*
+ * 4G link quality: statistics of the host heartbeat reception (the crane host
+ * writes the heartbeat counter once per second, so the gaps between two
+ * received heartbeats describe the downlink stability).
+ */
+static int cmd_hook_link(const struct shell *sh, size_t argc, char **argv)
+{
+	struct hook_link_stats st;
+
+	if ((argc == 2U) && (strcmp(argv[1], "clear") == 0)) {
+		hook_heartbeat_clear_link_stats();
+		shell_print(sh, "link statistics cleared");
+		return 0;
+	}
+
+	if (argc > 2U) {
+		shell_error(sh, "usage: hook link [clear]");
+		return -EINVAL;
+	}
+
+	hook_heartbeat_get_link_stats(&st);
+
+	shell_print(sh, "device         : %s (device.no=\"%s\")",
+		    hook_params_device_tag(), hook_params_device_no());
+	shell_print(sh, "heartbeats     : %u received, %u timeout(s) (gap > %u ms)",
+		    st.received, st.timeouts,
+		    (unsigned int)CONFIG_HOOK_LINK_TIMEOUT_MS);
+	shell_print(sh, "interval       : min %u / avg %u / max %u ms",
+		    st.interval_min_ms, st.interval_avg_ms, st.interval_max_ms);
+	shell_print(sh, "longest gap    : %u ms (counted as timeout)",
+		    st.timeout_max_ms);
+
+	if (st.last_timeout_unix_s > 0) {
+		char iso[40];
+
+		if (time_manager_format_local_iso8601_from_utc_ms(
+			    st.last_timeout_unix_s * MSEC_PER_SEC, iso,
+			    sizeof(iso)) == 0) {
+			shell_print(sh, "last timeout   : %s (uptime %u ms)", iso,
+				    st.last_timeout_ms);
+		} else {
+			shell_print(sh, "last timeout   : uptime %u ms",
+				    st.last_timeout_ms);
+		}
+	} else {
+		shell_print(sh, "last timeout   : none");
+	}
 
 	return 0;
 }
@@ -473,7 +528,7 @@ static int cmd_hook_ota_confirm(const struct shell *sh, size_t argc, char **argv
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	if (ota_manager_confirm_current_image() != 0) {
+	if (hook_ota_confirm() != 0) {
 		shell_error(sh, "image confirm failed");
 		return -EIO;
 	}
@@ -539,6 +594,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(rtc, NULL,
 		      "RTC state / host calibration: rtc [set <YYYY-MM-DD> <HH:MM>]",
 		      cmd_hook_rtc, 1, 3),
+	SHELL_CMD_ARG(link, NULL,
+		      "4G link quality from the host heartbeat: link [clear]",
+		      cmd_hook_link, 1, 1),
 	SHELL_CMD_ARG(craner, NULL, "Run a craner#AT command: craner <command>",
 		      cmd_hook_craner, 2, 8),
 	SHELL_CMD_ARG(usr, NULL,

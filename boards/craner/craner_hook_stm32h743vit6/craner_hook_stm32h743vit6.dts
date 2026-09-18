@@ -35,6 +35,10 @@
 		zephyr,console = &uart5;
 		zephyr,shell-uart = &uart5;
 		zephyr,dtcm = &dtcm;
+		/* Persistent device parameters (Zephyr Settings/ZMS) live on the
+		 * on-board QSPI flash, next to the persistent Modbus registers.
+		 */
+		zephyr,settings-partition = &param_store_partition;
 	};
 
 	aliases {
@@ -105,6 +109,35 @@
 			label = "RELOAD_4G";
 		};
 	};
+
+	/* SD card (offline event log storage), FATFS mount point /SD:. */
+	fstab {
+		compatible = "zephyr,fstab";
+
+		sd_mp: sd_mp {
+			compatible = "zephyr,fstab,fatfs";
+			disk-access;
+			mount-point = "/SD:";
+		};
+	};
+};
+
+/*
+ * SDMMC1 (PC8-PC12 + PD2): same pinout as the craner general H743 PCB and the
+ * AI safety car, the SD card seat has no card-detect GPIO.
+ *
+ * Clock: PLL1Q is 48 MHz (960 MHz VCO / div-q 20), the same domain clock the
+ * car board feeds to SDMMC, so the card uses the same clk-div 2 setting.
+ */
+&sdmmc1 {
+	pinctrl-0 = <&sdmmc1_d0_pc8 &sdmmc1_d1_pc9
+		     &sdmmc1_d2_pc10 &sdmmc1_d3_pc11
+		     &sdmmc1_ck_pc12 &sdmmc1_cmd_pd2>;
+	pinctrl-names = "default";
+	disk-name = "SD";
+	bus-width = <1>;
+	clk-div = <2>;
+	status = "okay";
 };
 
 /*
@@ -241,7 +274,7 @@
 	div-m = <5>;
 	mul-n = <192>;
 	div-p = <2>;
-	div-q = <10>;
+	div-q = <20>;
 	div-r = <2>;
 	clocks = <&clk_hse>;
 	status = "okay";

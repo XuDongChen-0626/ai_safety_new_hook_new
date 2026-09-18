@@ -249,7 +249,7 @@ static int32_t hook_at_cmd_ota_confirm(const uint8_t *cmd, uint16_t len,
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(len);
 
-	if (ota_manager_confirm_current_image() == 0) {
+	if (hook_ota_confirm() == 0) {
 		LOG_INF("running image confirmed");
 		hook_at_reply_ok(reply_fn);
 		return HOOK_AT_OK;

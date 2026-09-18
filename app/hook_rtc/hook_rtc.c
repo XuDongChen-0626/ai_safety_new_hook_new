@@ -27,6 +27,7 @@
 #include "hook_health.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "pwr_stm32.h"
 #include "system_def.h"
@@ -283,6 +284,12 @@ static int hook_rtc_apply_calibration(uint16_t year, uint16_t month_day,
 	hook_rtc_refresh_trust(unix_s);
 	hook_rtc_publish_time();
 
+	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_INF,
+				"RTC calibrated from host: %04u-%02u-%02u %02u:%02u:00 "
+				"(Beijing), trust record rebuilt",
+				year, (month_day >> 8) & 0xFFU, month_day & 0xFFU,
+				(hhmm >> 8) & 0xFFU, hhmm & 0xFFU);
+
 	return 0;
 }
 
@@ -419,6 +426,10 @@ static void hook_rtc_enter_standby(void)
 	}
 
 	LOG_INF("[PWR] entering STM32 hard standby");
+	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_WRN,
+				"entering STM32 hard standby, RTC alarm B will wake "
+				"the controller");
+	(void)offline_log_sync();
 	k_msleep(200);
 
 	pwr_clear_rtc_alarm_b_flag();
@@ -444,6 +455,9 @@ static void hook_rtc_sleep_enter(void)
 	hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT | ERR_LED_OFFLINE);
 	hook_health_sleep_update(true);
 
+	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_INF,
+				"entered soft standby (outputs off)");
+
 	LOG_INF("[PWR] soft standby entered (alarm power off)");
 }
 
@@ -456,6 +470,9 @@ static void hook_rtc_sleep_leave(void)
 	 * flash-light command register).
 	 */
 	hook_health_sleep_update(false);
+
+	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_INF,
+				"left soft standby (outputs on)");
 
 	LOG_INF("[PWR] soft standby left (alarm power on)");
 }

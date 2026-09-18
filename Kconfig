@@ -5,6 +5,9 @@ rsource "module/time_manager_service/Kconfig"
 rsource "module/ota_manager_service/Kconfig"
 rsource "module/fault_dump_service/Kconfig"
 rsource "module/modbus_data_model/Kconfig"
+rsource "module/device_param_server/Kconfig"
+rsource "module/device_identity_service/Kconfig"
+rsource "component/offline_log_service/Kconfig"
 
 menu "Craner AI safety hook application"
 
@@ -65,6 +68,18 @@ config HOOK_HEARTBEAT_TIMEOUT_MS
 	help
 	  After this silence the alarm-light supply (FLASH_LIGHT_POWER_EN) is
 	  turned off and ERR_HEARTBEAT_TIMEOUT is set in the error code register.
+
+config HOOK_LINK_TIMEOUT_MS
+	int "Host heartbeat link timeout for the 4G quality statistics (ms)"
+	default 20000
+	range 500 60000
+	help
+	  The crane host controller writes the heartbeat counter once per second.
+	  A gap between two received heartbeats longer than this value counts as
+	  one timeout in the link quality statistics (offline log category "4g",
+	  the "hook link" shell command and cloud command 0x0A). The timeout is
+	  counted once per outage, when the heartbeat comes back, so a long
+	  outage produces one log line instead of one per period.
 
 config HOOK_LOW_BATTERY_THRESHOLD
 	int "Low battery warning threshold"

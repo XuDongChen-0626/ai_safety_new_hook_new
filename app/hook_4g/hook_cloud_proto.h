@@ -31,6 +31,7 @@ extern "C" {
 #define CMD_ID_SLEEP_TIME    0x08U /* power on/off schedule        */
 #define CMD_ID_CURRENT_TIME  0x09U /* RTC date/time (calibration)  */
 #define CMD_ID_SYS_ERROR     0xF0U /* system error code            */
+#define CMD_ID_LINK_STATS    0x0AU /* 4G link / heartbeat quality  */
 
 /* Reply IDs (device -> cloud), request id | 0x80 on error. */
 #define ACK_ID_LIGHT        0x81U

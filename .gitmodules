@@ -16,3 +16,9 @@
 [submodule "module/modbus_data_model"]
 	path = module/modbus_data_model
 	url = https://github.com/HKCRC/modbus_data_model.git
+[submodule "module/device_identity_service"]
+	path = module/device_identity_service
+	url = https://github.com/HKCRC/device_identity_service.git
+[submodule "module/device_param_server"]
+	path = module/device_param_server
+	url = https://github.com/HKCRC/device_param_server.git

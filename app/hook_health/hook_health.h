@@ -54,6 +54,19 @@ void hook_health_report(uint16_t event);
 void hook_health_sleep_update(bool sleeping);
 
 /*
+ * The alarm supply was cut / restored by the host heartbeat supervision.
+ *
+ * While the supply is cut the alarm module cannot answer at all, so its
+ * offline detection is switched off at the same moment and the module is
+ * reported offline right away, with "host heartbeat timeout" as the reason
+ * instead of the usual "no answer for 15 s". Everything is restored (event
+ * enabled again, error bit cleared, module polled again) as soon as a host
+ * heartbeat comes back and the supply is switched on.
+ */
+void hook_health_alarm_supply_lost(void);
+void hook_health_alarm_supply_restored(void);
+
+/*
  * Suspend/resume the task check-in supervision. Used by the OTA service:
  * flash sector erase and the Ymodem transfer can keep a business thread busy
  * for longer than the check-in window, which must not trip the watchdog.
@@ -78,6 +91,14 @@ static inline void hook_health_report(uint16_t event)
 static inline void hook_health_sleep_update(bool sleeping)
 {
 	(void)sleeping;
+}
+
+static inline void hook_health_alarm_supply_lost(void)
+{
+}
+
+static inline void hook_health_alarm_supply_restored(void)
+{
 }
 
 static inline void hook_health_ota_gate(bool active)

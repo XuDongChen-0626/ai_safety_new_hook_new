@@ -13,6 +13,7 @@
 #define HOOK_HEARTBEAT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +24,28 @@ void hook_heartbeat_start(void);
 
 /* True while the alarm-light supply (PE5) is enabled. */
 bool hook_heartbeat_alarm_power_is_on(void);
+
+/*
+ * Host heartbeat reception quality (4G link quality).
+ *
+ * The crane host controller writes the heartbeat counter once per second, so
+ * the gaps between two received heartbeats describe how stable the 4G/MQTT
+ * downlink is: a gap longer than CONFIG_HOOK_LINK_TIMEOUT_MS counts as one
+ * timeout and is written to the offline log.
+ */
+struct hook_link_stats {
+	uint32_t received;           /* heartbeats received since boot/clear   */
+	uint32_t timeouts;           /* gaps longer than the link timeout      */
+	uint32_t interval_min_ms;    /* shortest gap between two heartbeats    */
+	uint32_t interval_avg_ms;    /* average gap                            */
+	uint32_t interval_max_ms;    /* longest gap                            */
+	uint32_t timeout_max_ms;     /* longest gap counted as a timeout       */
+	uint32_t last_timeout_ms;    /* uptime of the last timeout (0 = none)  */
+	int64_t last_timeout_unix_s; /* wall clock of the last timeout         */
+};
+
+void hook_heartbeat_get_link_stats(struct hook_link_stats *out);
+void hook_heartbeat_clear_link_stats(void);
 
 #ifdef __cplusplus
 }

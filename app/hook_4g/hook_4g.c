@@ -31,6 +31,7 @@
 #include "hook_cloud_proto.h"
 #include "hook_health.h"
 #include "hook_ota.h"
+#include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
 #include "uart_manage.h"
@@ -633,9 +634,24 @@ static void hook_4g_thread(void *a, void *b, void *c)
 		hook_4g_at_exchange_timeout_check();
 
 		if (hook_4g_rx_drops_isr != 0U) {
+			static uint32_t hook_4g_drops_logged;
+
 			LOG_WRN_RATELIMIT("4G receive overflow: %u frame(s) dropped "
 					  "(ring/len queue full)",
 					  hook_4g_rx_drops_isr);
+
+			/* Keep the drop history on the SD card as well (once per new
+			 * total, not per loop pass).
+			 */
+			if (hook_4g_rx_drops_isr > hook_4g_drops_logged) {
+				hook_4g_drops_logged = hook_4g_rx_drops_isr;
+				(void)offline_log_event(
+					OFFLINE_LOG_CAT_NETWORK,
+					OFFLINE_LOG_LEVEL_WRN,
+					"4G receive overflow: %u frame(s) dropped "
+					"(ring/len queue full)",
+					hook_4g_rx_drops_isr);
+			}
 		}
 
 		/* Receiver errors (overrun/framing) silently lose bytes, which

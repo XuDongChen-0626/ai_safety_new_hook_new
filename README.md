@@ -91,7 +91,7 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 ## 编译 / 烧录 / OTA
 
 `module/`（system_health / time_manager / ota_manager / fault_dump /
-modbus_data_model）与
+modbus_data_model / device_identity_service / device_param_server）与
 `tool/zephyr-dev-workflow` 登记为 git 子模块（HKCRC 上游仓库，提交号固定在
 gitlink 中，`.gitmodules` 只给出仓库地址）。克隆本工程后先初始化子模块：
 
@@ -169,6 +169,10 @@ hook ota confirm      # 确认当前镜像（等价 craner#AT+OTA_CONFIRM）
 hook rtc              # RTC 状态：I0x10~0x12 当前时间、H0x20~0x22 校准命令、trust
 hook rtc set 2026-09-16 14:30   # 写校准寄存器（等价上位机 Modbus 写 / 云端 0x09）
 hook reg i7           # 读输入寄存器 7（当前时间年），hook reg 113 读保持寄存器
+hook link             # 4G 心跳质量统计（次数/平均/最大间隔/最近超时时间），clear 清零
+id show               # 设备身份（UID、short id、MQTT client id）
+param list            # 设备参数（含工厂编号 device.no）；param set/save 写入 QSPI
+olog status|list|sync # SD 卡离线日志；mcumgr fs download 可远程拉取
 ```
 
 `hook usr` 发送的模块应答（以及模块主动输出的 `usr.cn#...` 行）都会打印在本控制台上，
@@ -223,13 +227,15 @@ craner#AT+SYSRESET   -> 冷复位
 
 ```text
 app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_heartbeat /
-            hook_rtc / hook_4g / hook_ota / hook_supervisor / hook_health）
+            hook_rtc / hook_4g / hook_ota / hook_supervisor / hook_health /
+            hook_params）
 boards/     自定义板级定义 craner_hook_stm32h743vit6
-component/  可移植组件（uart_manage / am_modbus，Modbus 从机支持寄存器回调）
+component/  可移植组件（uart_manage / am_modbus 从机寄存器回调 /
+            offline_log_service 离线事件日志）
 config/     产品配置片段（Kconfig / sysbuild）
 docs/       迁移说明与寄存器映射
 module/     复用服务（system_health / time_manager / ota_manager / fault_dump /
-            modbus_data_model）
+            modbus_data_model / device_identity_service / device_param_server）
 src/        平台层（main / board / hook_task / osal / Modbus 端口 / 待机 / shell）
 tool/       开发工作流脚本
 ```
@@ -294,8 +300,40 @@ tool/       开发工作流脚本
    `time_manager` 信任记录；未校准（trust 无效）时定时关机与硬待机不执行。
    部分写入的命令 60 s 后自动丢弃，避免半条命令被迟到补齐。
 10. **组件来源**：`module/`（system_health / time_manager / ota_manager /
-    fault_dump / modbus_data_model）与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**
+    fault_dump / modbus_data_model / device_identity_service / device_param_server）
+    与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**
     （`.gitmodules` + gitlink，提交号与参考工程 `craner_ai_safety_car` 一致），
     子模块 git 仓库位于 `.git/modules/...`，工作副本可直接离线编译。
     各依赖的上游地址、固定提交号，以及离线转换成子模块的完整步骤见
     [docs/依赖与子模块管理.md](docs/依赖与子模块管理.md)。
+11. **设备标识 / 参数 / 离线日志 / 4G 质量统计**（2026-09-18 新增）：
+    * 身份：`module/device_identity_service` 从 UID 派生 `short_id` / hostname /
+      MQTT client id；`id show` 查看；
+    * 参数：`module/device_param_server` + ZMS 存到 **QSPI `param-store` 分区**
+      （`zephyr,settings-partition`），工厂编号用 `device.no`（`app/hook_params/`），
+      `param set device.no ais011` + `param save` 写入；每次开机记录一次完整参数表到离线日志（`param` 分类），
+      之后每次 `param save` 真正写入后再记录一次（`param <key>="<value>" (boot|saved snapshot)`，
+      轮询 `device_param_server` 的 `save_count` 实现，不改子模块）；
+    * 离线日志：SD 卡（SDMMC1 PC8-PC12 + PD2，FATFS `/SD:`）由
+      `component/offline_log_service` 写入 `/SD:/olog/`，记录启动/复位原因、软硬待机、
+      RTC 校准、BMS/声光离线恢复、4G 心跳超时、OTA 全过程；`olog status/list/sync` 现场查看，
+      也可用 `mcumgr fs download` 通过 shell 串口拉取（只允许读 `/SD:/olog`）；
+    * 4G 质量：主机心跳每秒一次，`hook link` / 云端 0x0A 读取
+      超时次数、平均/最大间隔、最近一次超时时间戳；间隔超过 20 s 记一次超时，
+      且**只在心跳恢复时写一条** `4g` 分类离线日志（断链期间不刷日志，软待机不统计）；
+      云端 0x0A 写 1 字节 `0x5A` 才清零统计。
+    详细说明与现场验证步骤见 [docs/离线日志与设备参数.md](docs/离线日志与设备参数.md)。
+    资源影响：Flash +61.2 KB、RAM +22.4 KB（app 231,812 B / 147,480 B）。
+12. **主机心跳超时与声光报警器的联动**（2026-09-18 调整）：主机心跳静默
+    `HEARTBEAT_TIMEOUT_MS`（60 s）后，控制器切断报警器供电（PE5）并关闭 PWD_LED，
+    并在同一步完成：
+    * 立即把声光模块上报为**离线**（置 `ERR_LED_OFFLINE` + 写一条 `alarm` 分类离线日志），
+      原因是「主机心跳超时」，而不是再等 15 s 无应答后按“通讯超时”判离线；
+    * 关闭声光模块的离线检测（`HOOK_HEALTH_EVENT_ALARM`）并**停止一切 Modbus 通讯**
+      （`hook_alarm_set_suspend(true)`），不再对一个已经断电的模块反复重试
+      （现场日志中的 `alarm module keepalive write failed` 不再出现）；
+    * 软待机退出时若仍处于该状态，`hook_health_sleep_update(false)` 不会重新打开声光检测。
+
+    重新收到主机心跳后按相反顺序恢复：供电 → 恢复通讯（音量/LED 缓存已作废，第一轮重新下发
+    真实值）→ 重新打开离线检测（15 s 窗口从此刻起算）→ 清除 `ERR_LED_OFFLINE`。
+    上位机把 `HEARTBEAT_ENABLE` 写 0（关闭心跳监督）时，同样立即解除该状态。

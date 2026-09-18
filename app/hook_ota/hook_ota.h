@@ -40,6 +40,13 @@ int hook_ota_request(void);
 /* Abort the session, if any. */
 void hook_ota_cancel(void);
 
+/*
+ * Confirm the running image (engineer driven): clears the MCUboot test state
+ * and cancels the "not confirmed -> rollback" timer of ota_manager_service.
+ * Returns 0 on success.
+ */
+int hook_ota_confirm(void);
+
 /* True while a session is armed or receiving. */
 bool hook_ota_is_active(void);
 

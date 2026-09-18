@@ -74,6 +74,15 @@ static uint16_t hook_alarm_volume_sent;
 static uint16_t hook_alarm_volume_attempt;
 static bool hook_alarm_led_online;
 static uint32_t hook_alarm_last_led_retry_ms;
+/*
+ * Last LED state the module acknowledged (0xFF = unknown, e.g. right after
+ * the supply was cut and restored, so the next pass re-sends it).
+ */
+static uint8_t hook_alarm_led_physical_state = 0xFFU;
+/* True while the alarm supply is cut and the module must not be polled.
+ * Written by app/hook_heartbeat, read by the alarm thread.
+ */
+static volatile bool hook_alarm_suspended;
 
 static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
 {
@@ -83,6 +92,25 @@ static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
 	ModbusQuery(&hook_alarm_master, hook_alarm_telegram);
 
 	return osal_notify_wait(&hook_alarm_notify, MODBUS_WAIT_TIMEOUT_MS);
+}
+
+void hook_alarm_set_suspend(bool suspended)
+{
+	if (suspended == hook_alarm_suspended) {
+		return;
+	}
+
+	hook_alarm_suspended = suspended;
+
+	if (suspended) {
+		/* The module loses power: whatever it acknowledged before is
+		 * gone, so force a fresh volume write and LED command on the
+		 * first exchange after the resume.
+		 */
+		hook_alarm_volume_sent = 0xFFFFU;
+		hook_alarm_volume_attempt = 0xFFFFU;
+		hook_alarm_led_physical_state = 0xFFU;
+	}
 }
 
 void hook_alarm_force_volume_sync(void)
@@ -189,7 +217,6 @@ static void hook_alarm_led_logic(void)
 {
 	static uint32_t last_step_ms;
 	static uint32_t led_step_counter;
-	static uint8_t current_physical_state = 0xFFU;
 	uint16_t cmd_led_switch = hook_reg_get(CMD_LED_SWITCH);
 	uint16_t status_buzzer = hook_reg_input_get(STATUS_BUZZER);
 	uint16_t error_code = hook_reg_get_error_bits();
@@ -211,10 +238,11 @@ static void hook_alarm_led_logic(void)
 			last_step_ms = hook_get_time_ms();
 			led_step_counter++;
 
-			if ((desired_state != current_physical_state) ||
+			if ((desired_state != hook_alarm_led_physical_state) ||
 			    ((error_code & ERR_LED_OFFLINE) != 0U)) {
 				bool offline_retry =
-					(desired_state == current_physical_state);
+					(desired_state ==
+					 hook_alarm_led_physical_state);
 
 				/* Offline re-probe at most once per second. */
 				if (offline_retry &&
@@ -230,7 +258,8 @@ static void hook_alarm_led_logic(void)
 							       CMD_LED_ON :
 							       CMD_LED_OFF);
 				if (ret == OP_OK_QUERY) {
-					current_physical_state = desired_state;
+					hook_alarm_led_physical_state =
+						desired_state;
 					hook_reg_input_set(STATUS_LED_SWITCH, 1U);
 					hook_alarm_report_online();
 				} else {
@@ -240,7 +269,7 @@ static void hook_alarm_led_logic(void)
 				}
 			}
 		}
-	} else if ((current_physical_state != 0U) ||
+	} else if ((hook_alarm_led_physical_state != 0U) ||
 		   ((error_code & ERR_LED_OFFLINE) != 0U)) {
 		/* Flashing disabled: make sure the module LED is really off. */
 		if ((hook_get_time_ms() - hook_alarm_last_led_retry_ms) <
@@ -251,7 +280,7 @@ static void hook_alarm_led_logic(void)
 
 		ret = hook_alarm_write(REG_LED_CTRL, CMD_LED_OFF);
 		if (ret == OP_OK_QUERY) {
-			current_physical_state = 0U;
+			hook_alarm_led_physical_state = 0U;
 			led_step_counter = 0U;
 			hook_reg_input_set(STATUS_LED_SWITCH, 0U);
 			hook_alarm_report_online();
@@ -380,7 +409,7 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 		 */
 		hook_health_task_alive(HOOK_TASK_ALIVE_ALARM);
 
-		if (is_soft_standby != 1U) {
+		if ((is_soft_standby != 1U) && !hook_alarm_suspended) {
 			hook_alarm_volume_sync();
 
 			/* The blink pattern has its own 250 ms stepper and is

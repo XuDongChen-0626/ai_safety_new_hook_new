@@ -1,0 +1,197 @@
+menu "Offline log service"
+
+config OFFLINE_LOG_SERVICE
+	bool "Enable SD card offline event log service"
+	default n
+	depends on FILE_SYSTEM
+	depends on DISK_ACCESS
+	depends on DISK_DRIVER_SDMMC
+	depends on FAT_FILESYSTEM_ELM
+	depends on TIME_MANAGER_SERVICE
+	depends on TIME_LOCAL_FORMAT
+	help
+	  Enable the offline event log service. Important state changes are
+	  recorded by product code through offline_log_event() and written to
+	  the SD card under /SD:/olog/ (pending file first, dated files after a
+	  trusted time source is available). Log files are pullable over
+	  Ethernet with the MCUmgr file-system group.
+
+config OFFLINE_LOG_DISK_NAME
+	string "SD card disk name"
+	default "SD"
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Disk name registered by the SDMMC driver. Must match the disk-name
+	  property of the SDMMC node in the board device tree.
+
+config OFFLINE_LOG_MOUNT_POINT
+	string "SD card FATFS mount point"
+	default "/SD:"
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  FATFS mount point. Must match the fstab mount-point property in the
+	  board device tree.
+
+config OFFLINE_LOG_BASE_DIR
+	string "Offline log root directory on SD card"
+	default "/olog"
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Root directory that holds date directories and the pending
+	  directory, relative to the mount point.
+
+config OFFLINE_LOG_FILE_PREFIX
+	string "Offline log file name prefix"
+	default "hook"
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Log files are named
+	    <prefix>_<date>_<time>_<seq>.log       (dated files)
+	    <prefix>_pending_boot_<seq>.log        (no trusted time yet)
+	  so a file copied off the SD card identifies the product variant by
+	  itself. Override it in a product config when a build must keep a
+	  different tag.
+
+config OFFLINE_LOG_QUEUE_SIZE
+	int "Offline log message queue size (records)"
+	default 64
+	range 16 512
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Number of records buffered in RAM while the SD card is absent or
+	  while the writer thread is busy. Oldest records are dropped when the
+	  queue is full.
+
+config OFFLINE_LOG_MSG_MAX
+	int "Maximum message body length in bytes"
+	default 192
+	range 64 512
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Maximum formatted message length of one offline log event, excluding
+	  the timestamp/level/category prefix.
+
+config OFFLINE_LOG_MAX_FILE_KB
+	int "Maximum size of one log file in KB"
+	default 1024
+	range 64 16384
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  When the current daily file exceeds this size a new daily file with
+	  an incremented sequence number is opened.
+
+config OFFLINE_LOG_RETENTION_DAYS
+	int "Offline log retention in days"
+	default 30
+	range 1 365
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Date directories older than this many days are deleted automatically.
+
+config OFFLINE_LOG_MAX_TOTAL_KB
+	int "Maximum total offline log storage in KB"
+	default 32768
+	range 1024 1048576
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Hard storage cap for the offline log root. When the cap is exceeded,
+	  the oldest date directories are deleted first, then the next oldest,
+	  until the used space fits under the cap. This protects the SD card
+	  when retention-by-days alone is not enough.
+
+config OFFLINE_LOG_PENDING_MAX_TOTAL_KB
+	int "Maximum total pending log storage in KB (no trusted time)"
+	default OFFLINE_LOG_MAX_TOTAL_KB
+	range 256 1048576
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Hard storage cap for /SD:/olog/pending/ while the device has no
+	  trusted time. Pending files are not covered by the date-directory
+	  retention policy, so without this cap they could grow without bound
+	  on a device that is never calibrated. When the cap is exceeded the
+	  oldest <prefix>_pending_boot_*.log files are deleted (newest/current
+	  file is kept). Once trusted time is available, pending files are
+	  still migrated to date directories instead of being deleted.
+
+config OFFLINE_LOG_FREE_SPACE_MIN_KB
+	int "Minimum free SD space kept by cleanup in KB"
+	default 8192
+	range 256 1048576
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Absolute free-space floor. When the SD card free space drops below
+	  max(OFFLINE_LOG_FREE_SPACE_MIN_KB, total *
+	  OFFLINE_LOG_FREE_SPACE_MIN_PERCENT / 100), cleanup deletes the
+	  oldest date directories until free space is restored. This is a
+	  fail-safe against a nearly full card; the text event log itself is
+	  tiny, so a few MB of headroom is enough.
+
+config OFFLINE_LOG_FREE_SPACE_MIN_PERCENT
+	int "Minimum free SD space kept by cleanup in percent"
+	default 0
+	range 0 50
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Free-space threshold expressed as a percentage of the total SD card
+	  capacity. 0 disables the percentage part. A percentage of an 8-64 GB
+	  card is meaningless for a text event log that only consumes a few MB;
+	  enable it only when the same card also stores large high-rate data
+	  (.bbx blackbox, CCTV recordings, ...) and you need to keep a relative
+	  free-space margin for those writers.
+
+config OFFLINE_LOG_CLEANUP_MAX_DIRS
+	int "Maximum date directories removed per cleanup pass"
+	default 4
+	range 1 32
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Bounds how long one cleanup pass may spend deleting. Cleanup runs
+	  periodically, so deleting at most this many day directories per pass
+	  keeps writer-thread stalls short while the log service keeps running.
+
+config OFFLINE_LOG_WRITER_STACK_SIZE
+	int "Offline log writer thread stack size"
+	default 3072
+	range 2048 8192
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Stack size of the writer/mount thread.
+
+config OFFLINE_LOG_WRITER_PRIORITY
+	int "Offline log writer thread priority"
+	default 12
+	range 0 15
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Zephyr preemptive priority of the writer thread. Lower numbers are
+	  higher priority; keep this thread low so it never perturbs real-time
+	  business threads.
+
+config OFFLINE_LOG_MOUNT_RETRY_MS
+	int "SD card mount retry interval in milliseconds"
+	default 5000
+	range 250 60000
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Interval between mount attempts while the SD card is missing or not
+	  formatted.
+
+config OFFLINE_LOG_SHELL
+	bool "Offline log shell commands"
+	default y
+	depends on OFFLINE_LOG_SERVICE && SHELL
+	help
+	  Register the "olog" shell command tree (status, sync, list, cleanup,
+	  demo).
+
+config OFFLINE_LOG_MCUMGR
+	bool "MCUmgr file-system management for offline logs"
+	default y
+	depends on OFFLINE_LOG_SERVICE && MCUMGR_GRP_FS
+	help
+	  Register an MCUmgr file-access guard that allows download/status/
+	  checksum of the offline log root only, denies arbitrary uploads, and
+	  records file transfer events. Also records image-management DFU
+	  events when MCUMGR_GRP_IMG is enabled.
+
+endmenu

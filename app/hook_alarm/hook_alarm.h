@@ -16,6 +16,19 @@ extern "C" {
 
 void hook_alarm_start(void);
 
+/*
+ * Park/resume the alarm module handling.
+ *
+ * The host heartbeat supervision cuts the alarm supply (PE5) when the host
+ * stops talking; an unpowered module cannot answer Modbus requests, so the
+ * controller must stop talking to it at the same moment and only resume once
+ * the supply is back. While suspended the module logic is skipped entirely
+ * (the thread keeps checking in with the health service) and the cached
+ * volume/LED state is invalidated, so the first exchange after the resume
+ * re-pushes the real register values.
+ */
+void hook_alarm_set_suspend(bool suspended);
+
 /* Force the volume register to be pushed to the module again. */
 void hook_alarm_force_volume_sync(void);
 

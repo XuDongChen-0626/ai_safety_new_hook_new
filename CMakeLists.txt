@@ -13,6 +13,9 @@ add_subdirectory(module/time_manager_service)
 add_subdirectory(module/ota_manager_service)
 add_subdirectory(module/fault_dump_service)
 add_subdirectory(module/modbus_data_model)
+add_subdirectory(module/device_param_server)
+add_subdirectory(module/device_identity_service)
+add_subdirectory(component/offline_log_service)
 
 # Hook product applications.
 add_subdirectory(app/hook_modbus)
@@ -24,6 +27,7 @@ add_subdirectory(app/hook_4g)
 add_subdirectory(app/hook_supervisor)
 add_subdirectory(app/hook_health)
 add_subdirectory(app/hook_ota)
+add_subdirectory(app/hook_params)
 
 target_include_directories(app PRIVATE
 	src
@@ -38,6 +42,7 @@ target_include_directories(app PRIVATE
 	app/hook_supervisor
 	app/hook_health
 	app/hook_ota
+	app/hook_params
 )
 
 target_sources(app PRIVATE
@@ -62,4 +67,7 @@ target_link_libraries(app PRIVATE
 	ota_manager_service
 	fault_dump_service
 	modbus_data_model
+	device_param_server
+	device_identity_service
+	offline_log_service
 )

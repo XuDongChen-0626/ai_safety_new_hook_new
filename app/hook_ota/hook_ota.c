@@ -24,7 +24,9 @@
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "hook_ymodem.h"
+#include "offline_log_service.h"
 #include "osal_zephyr.h"
+#include "ota_manager_service.h"
 #include "system_def.h"
 #include "uart_manage.h"
 
@@ -299,6 +301,14 @@ static void hook_ota_ymodem_file_end(const hook_ymodem_file_info_t *file,
 	hook_ota_set_state(HOOK_OTA_STAGED);
 	hook_ota_report("DONE");
 
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"OTA staged: slot1 image v%u.%u.%u (%u B) verified, "
+				"booting MCUboot test image",
+				header.h.v1.sem_ver.major,
+				header.h.v1.sem_ver.minor,
+				header.h.v1.sem_ver.revision,
+				header.h.v1.image_size);
+
 	LOG_WRN("OTA staged: rebooting in %u ms to let MCUboot install slot1",
 		(unsigned int)CONFIG_HOOK_OTA_REBOOT_DELAY_MS);
 }
@@ -312,6 +322,10 @@ static void hook_ota_ymodem_abort(hook_ymodem_status_t reason, void *user)
 	hook_ota_report((reason == HOOK_YMODEM_ERR_ABORTED) ? "ERROR,20" :
 							      "ERROR,21");
 	hook_health_ota_gate(false);
+
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_ERR,
+				"OTA aborted (reason=%d), staying on the running image",
+				(int)reason);
 
 	LOG_ERR("OTA aborted (reason=%d), staying on the running image",
 		(int)reason);
@@ -348,6 +362,8 @@ int hook_ota_request(void)
 	}
 
 	LOG_INF("OTA session requested");
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"OTA receiver armed by the host tool");
 	hook_ota_last_progress_bytes = 0U;
 	hook_ota_last_crc_request_ms = 0U;
 	hook_ota_last_activity_ms = k_uptime_get_32();
@@ -383,6 +399,8 @@ void hook_ota_cancel(void)
 	}
 
 	LOG_WRN("OTA cancel requested");
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
+				"OTA session cancelled");
 
 	/* Tell a possibly still transmitting host to stop (CAN CAN). */
 	{
@@ -395,6 +413,22 @@ void hook_ota_cancel(void)
 	hook_ota_flash_active = false;
 	hook_health_ota_gate(false);
 	hook_ota_set_state(HOOK_OTA_IDLE);
+}
+
+int hook_ota_confirm(void)
+{
+	int ret = ota_manager_confirm_current_image();
+
+	if (ret != 0) {
+		(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_ERR,
+					"image confirm failed (%d)", ret);
+		return ret;
+	}
+
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"running image confirmed by the engineer");
+
+	return 0;
 }
 
 void hook_ota_feed(const uint8_t *data, uint16_t len)
