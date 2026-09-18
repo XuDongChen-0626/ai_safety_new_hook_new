@@ -31,28 +31,78 @@ LOG_MODULE_REGISTER(hook_health, CONFIG_LOG_DEFAULT_LEVEL);
 #define HOOK_HEALTH_TASK_TIMEOUT_MS 12000U
 #define HOOK_HEALTH_CHECK_PERIOD_MS 1000U
 
-/* Field device timeouts */
-#define HOOK_HEALTH_BMS_TIMEOUT_MS 25000U
-#define HOOK_HEALTH_ALARM_TIMEOUT_MS 25000U
-#define HOOK_HEALTH_4G_TIMEOUT_MS 300000U
-#define HOOK_HEALTH_GPS_TIMEOUT_MS 600000U
-#define HOOK_HEALTH_HOST_TIMEOUT_MS (HEARTBEAT_TIMEOUT_MS + 5000U)
-
 /*
- * Field events are for observability (logs + the health shell): the error
- * code register (113) stays owned by the module that detects the fault
- * (hook_bms / hook_alarm / hook_relay), exactly like the CubeMX firmware, so
- * every bit has a single writer.
+ * Field device offline timeouts. These are the *only* online/offline criteria
+ * of the product: the polling modules report every successful exchange
+ * (hook_health_report) and do nothing else, the service decides when a device
+ * is offline, and the event callbacks below perform every consequence
+ * (error-code bits, logs, action policy) - the same split as
+ * craner_ai_safety_car ("health callbacks are the single owner of the readable
+ * /error state registers, polling threads only report successful reads").
+ */
+/*
+ * The BMS answers every 500 ms (it keeps being polled in soft standby, so the
+ * detection stays active there as well); 10 s = 20 missed exchanges. This is
+ * the offline criterion for both the ERR_BMS_READ_FAIL bit and the health
+ * event.
+ */
+#define HOOK_HEALTH_BMS_TIMEOUT_MS 10000U
+/* The alarm module is polled at least every 3 s (hook_alarm_volume_sync); */
+/* 15 s tolerates 5 consecutive misses. */
+#define HOOK_HEALTH_ALARM_TIMEOUT_MS 15000U
+/*
+ * The host controller must move the heartbeat counter once per minute.
+ * hook_heartbeat cuts the alarm supply at HEARTBEAT_TIMEOUT_MS (60 s) as a
+ * product action; the offline decision (and the ERR_HEARTBEAT_TIMEOUT bit)
+ * gets 5 s extra margin so a heartbeat that arrives exactly on the 60 s
+ * boundary is not flagged.
+ */
+#define HOOK_HEALTH_HOST_TIMEOUT_MS (HEARTBEAT_TIMEOUT_MS + 5000U)
+/*
+ * The two callbacks below are the single owner of the device error bits in the
+ * error-code register: a device is offline exactly when the service says so
+ * (offline_timeout_ms without a hook_health_report()), and the same callback
+ * that logs it also raises the bit, so the error code, the work mode and the
+ * health statistics can never disagree. The polling modules only report
+ * successful exchanges.
  */
 static void hook_health_offline_first(const struct sys_health_event_status *st)
 {
-	LOG_WRN("field event %s offline after %u ms", st->name,
+	LOG_WRN("field device %s offline after %u ms", st->name,
 		st->offline_timeout_ms);
+
+	switch (st->event) {
+	case HOOK_HEALTH_EVENT_BMS:
+		hook_reg_set_error_bits(ERR_BMS_READ_FAIL);
+		break;
+	case HOOK_HEALTH_EVENT_ALARM:
+		hook_reg_set_error_bits(ERR_LED_OFFLINE);
+		break;
+	case HOOK_HEALTH_EVENT_HOST_HEARTBEAT:
+		hook_reg_set_error_bits(ERR_HEARTBEAT_TIMEOUT);
+		break;
+	default:
+		break;
+	}
 }
 
 static void hook_health_online_first(const struct sys_health_event_status *st)
 {
-	LOG_INF("field event %s online again", st->name);
+	LOG_INF("field device %s online again", st->name);
+
+	switch (st->event) {
+	case HOOK_HEALTH_EVENT_BMS:
+		hook_reg_clear_error_bits(ERR_BMS_READ_FAIL);
+		break;
+	case HOOK_HEALTH_EVENT_ALARM:
+		hook_reg_clear_error_bits(ERR_LED_OFFLINE);
+		break;
+	case HOOK_HEALTH_EVENT_HOST_HEARTBEAT:
+		hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT);
+		break;
+	default:
+		break;
+	}
 }
 
 static const struct sys_health_event hook_health_events[] = {
@@ -88,39 +138,31 @@ static const struct sys_health_event hook_health_events[] = {
 		.online_first_func = hook_health_online_first,
 	},
 	{
-		.event = HOOK_HEALTH_EVENT_GPS,
-		.name = "gps",
-		.enable = IS_ENABLED(CONFIG_HOOK_GPS_ENABLE),
-		.priority = 4U,
-		.offline_timeout_ms = HOOK_HEALTH_GPS_TIMEOUT_MS,
-		.action_mask = SYS_HEALTH_ACTION_LOG,
-	},
-	{
 		.event = HOOK_HEALTH_EVENT_HOST_HEARTBEAT,
 		.name = "host_heartbeat",
-		.enable = IS_ENABLED(CONFIG_HOOK_HEARTBEAT_RELAY_ENABLE),
+		.enable = IS_ENABLED(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE),
 		.priority = 2U,
 		.offline_timeout_ms = HOOK_HEALTH_HOST_TIMEOUT_MS,
 		.action_mask = SYS_HEALTH_ACTION_LOG,
 		.offline_first_func = hook_health_offline_first,
 		.online_first_func = hook_health_online_first,
 	},
-	{
-		.event = HOOK_HEALTH_EVENT_4G,
-		.name = "modem_4g",
-		.enable = IS_ENABLED(CONFIG_HOOK_4G_ENABLE),
-		.priority = 4U,
-		.offline_timeout_ms = HOOK_HEALTH_4G_TIMEOUT_MS,
-		.action_mask = SYS_HEALTH_ACTION_LOG,
-	},
 };
 
-static const uint16_t hook_health_field_events[] = {
-	HOOK_HEALTH_EVENT_BMS,
+/*
+ * Events that are paused while the controller is in soft standby.
+ *
+ * The BMS is deliberately NOT in this list: the CubeMX firmware kept polling
+ * the BMS during soft standby (modbus_bms_handle() had no standby check) and
+ * this port keeps doing so, so its offline detection must stay active too.
+ * The alarm module stops talking to the sound & light module in standby
+ * (modbus_alarm_handle() returned early there) and the host heartbeat
+ * supervision keeps feeding its own timers, so those two only produce noise
+ * while asleep and are disabled.
+ */
+static const uint16_t hook_health_standby_paused_events[] = {
 	HOOK_HEALTH_EVENT_ALARM,
-	HOOK_HEALTH_EVENT_GPS,
 	HOOK_HEALTH_EVENT_HOST_HEARTBEAT,
-	HOOK_HEALTH_EVENT_4G,
 };
 
 static atomic_t hook_health_alive_mask;
@@ -138,8 +180,8 @@ void hook_health_report(uint16_t event)
 
 void hook_health_sleep_update(bool sleeping)
 {
-	for (size_t i = 0U; i < ARRAY_SIZE(hook_health_field_events); i++) {
-		uint16_t event = hook_health_field_events[i];
+	for (size_t i = 0U; i < ARRAY_SIZE(hook_health_standby_paused_events); i++) {
+		uint16_t event = hook_health_standby_paused_events[i];
 
 		if (sleeping) {
 			sys_health_event_disable(event);
@@ -149,8 +191,8 @@ void hook_health_sleep_update(bool sleeping)
 		}
 	}
 
-	LOG_INF("field health events %s",
-		sleeping ? "disabled (soft standby)" : "enabled");
+	LOG_INF("alarm/heartbeat health events %s (BMS supervision stays active)",
+		sleeping ? "disabled for soft standby" : "enabled");
 }
 
 void hook_health_ota_gate(bool active)
@@ -237,11 +279,11 @@ static const char *hook_health_missing_tasks(uint32_t missing)
 	if ((missing & HOOK_TASK_ALIVE_BMS) != 0U) {
 		used += snprintk(&text[used], sizeof(text) - used, "bms ");
 	}
-	if ((missing & HOOK_TASK_ALIVE_RELAY) != 0U) {
-		used += snprintk(&text[used], sizeof(text) - used, "relay ");
+	if ((missing & HOOK_TASK_ALIVE_HEARTBEAT) != 0U) {
+		used += snprintk(&text[used], sizeof(text) - used, "heartbeat ");
 	}
-	if ((missing & HOOK_TASK_ALIVE_GPS) != 0U) {
-		used += snprintk(&text[used], sizeof(text) - used, "gps ");
+	if ((missing & HOOK_TASK_ALIVE_RTC) != 0U) {
+		used += snprintk(&text[used], sizeof(text) - used, "rtc ");
 	}
 	if ((missing & HOOK_TASK_ALIVE_4G) != 0U) {
 		(void)snprintk(&text[used], sizeof(text) - used, "4g ");
@@ -272,6 +314,21 @@ static void hook_health_thread(void *a, void *b, void *c)
 		}
 
 		if (hook_get_time_ms() - started_ms < HOOK_HEALTH_BOOT_GRACE_MS) {
+			/*
+			 * Supervision has not started yet (the slowest thread is
+			 * the alarm module: its power-on self test blocks for
+			 * ~8 s before its first check-in). Keep the service event
+			 * ONLINE while the grace runs: the service judges
+			 * "offline" purely from the age of the last
+			 * hook_health_report(), and its timeout for this event
+			 * (HOOK_HEALTH_TASK_TIMEOUT_MS = 12 s) is SHORTER than
+			 * this grace. Staying silent here latched the
+			 * STOP_WATCHDOG_FEED action at every boot ("System
+			 * protect latched by event=1 task_alive" 12 s after
+			 * reset) and, with the watchdog feed backend enabled,
+			 * would have reset the controller in a loop.
+			 */
+			hook_health_report(HOOK_HEALTH_EVENT_TASK_ALIVE);
 			k_msleep(HOOK_HEALTH_CHECK_PERIOD_MS);
 			continue;
 		}

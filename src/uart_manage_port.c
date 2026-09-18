@@ -36,12 +36,6 @@ static uint8_t modem_send_buff[HOOK_UART_SEND_BUFFER_SIZE];
 static uint8_t modem_send_fifo_buff[HOOK_UART_SEND_FIFO_SIZE];
 static uint8_t modem_process_buff[HOOK_UART_PROCESS_BUFFER];
 
-static uint8_t gps_recv_buff[HOOK_UART_RECV_BUFFER_SIZE];
-static uint8_t gps_recv_buff_alt[HOOK_UART_RECV_BUFFER_SIZE];
-static uint8_t gps_send_buff[HOOK_UART_SEND_BUFFER_SIZE];
-static uint8_t gps_send_fifo_buff[HOOK_UART_SEND_FIFO_SIZE];
-static uint8_t gps_process_buff[HOOK_UART_PROCESS_BUFFER];
-
 static const uart_inferface_t hook_uart_manage_table[] = {
 	{
 		.name = "4g",
@@ -58,23 +52,6 @@ static const uart_inferface_t hook_uart_manage_table[] = {
 		.send_buffer_size = sizeof(modem_send_buff),
 		.send_fifo_buffer = modem_send_fifo_buff,
 		.send_fifo_size = sizeof(modem_send_fifo_buff),
-		.send_callback = NULL,
-	},
-	{
-		.name = "gps",
-		.uart_dev = DEVICE_DT_GET(DT_NODELABEL(usart3)),
-		.baudrate = 115200U,
-		.rx_idle_ms = 20U,
-		.recv_buffer = gps_recv_buff,
-		.recv_buffer_size = sizeof(gps_recv_buff),
-		.recv_buffer_alt = gps_recv_buff_alt,
-		.process_buffer = gps_process_buff,
-		.process_buffer_size = sizeof(gps_process_buff),
-		.recv_callback = NULL,
-		.send_buffer = gps_send_buff,
-		.send_buffer_size = sizeof(gps_send_buff),
-		.send_fifo_buffer = gps_send_fifo_buff,
-		.send_fifo_size = sizeof(gps_send_fifo_buff),
 		.send_callback = NULL,
 	},
 };

@@ -88,7 +88,7 @@ static hook_led_anim_t hook_heart_led = {
 
 static void hook_supervisor_process(void)
 {
-	uint16_t error = hook_reg_get(REG_ERROR_CODE);
+	uint16_t error = hook_reg_input_get(REG_ERROR_CODE);
 	hook_led_mode_t mode = HOOK_LED_MODE_NORMAL;
 	uint8_t blink_count = 0U;
 
@@ -120,8 +120,8 @@ static void hook_supervisor_process(void)
 
 static void hook_work_mode_logic(void)
 {
-	uint16_t error = hook_reg_get(REG_ERROR_CODE);
-	uint16_t battery = hook_reg_get(STATUS_BMS_BATTERY);
+	uint16_t error = hook_reg_input_get(REG_ERROR_CODE);
+	uint16_t battery = hook_reg_input_get(STATUS_BMS_BATTERY);
 	hook_work_mode_t mode;
 
 	is_power_sleep_flag = (is_soft_standby == 1U) ? 1U : 0U;
@@ -138,7 +138,7 @@ static void hook_work_mode_logic(void)
 
 	hook_main_status = (mode == MODE_DEVICE_STANDBY) ? 2U :
 			   (mode == DEVICE_ERROR) ? 3U : 1U;
-	hook_reg_set(STATUS_WORK_MODE, (uint16_t)mode);
+	hook_reg_input_set(STATUS_WORK_MODE, (uint16_t)mode);
 }
 
 static void hook_supervisor_thread(void *a, void *b, void *c)

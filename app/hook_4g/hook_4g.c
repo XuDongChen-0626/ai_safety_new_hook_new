@@ -11,6 +11,12 @@
  *   "usr.cn#..."          echo of a modem command line
  *   anything else         cloud payload -> 0xA5 protocol parser
  *
+ * There is deliberately no periodic traffic towards the module any more.
+ * The old firmware sent "usr.cn#AT+Z" once per hour as a link keep-alive; on
+ * this product the module restarts every time it receives it (observed on the
+ * bench), so the controller no longer sends it. Keeping the MQTT socket alive
+ * is left to the module/cloud and is tracked as a follow-up item.
+ *
  * The UART receive callback runs in interrupt/timer context, so it only
  * queues the frame; all parsing and replying happens in the 4G thread.
  */
@@ -587,26 +593,6 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	hook_cloud_proto_feed(buf, len);
 }
 
-/*
- * The usr.cn module keeps the MQTT socket open when it sees periodic AT
- * traffic; the old firmware sent "usr.cn#AT+Z" once per hour.
- */
-static void hook_4g_keepalive(void)
-{
-	static int64_t last_keepalive_ms;
-	static const uint8_t keepalive_cmd[] = "usr.cn#AT+Z\r\n";
-	int64_t now = k_uptime_get();
-
-	if ((now - last_keepalive_ms) <
-	    (int64_t)CONFIG_HOOK_4G_KEEPALIVE_PERIOD_S * 1000) {
-		return;
-	}
-
-	last_keepalive_ms = now;
-	(void)hook_4g_send(keepalive_cmd, (uint16_t)(sizeof(keepalive_cmd) - 1U));
-	LOG_DBG("4G keepalive sent");
-}
-
 static void hook_4g_thread(void *a, void *b, void *c)
 {
 	/* 2 KiB scratch outside the thread stack (a frame may hold a whole
@@ -641,11 +627,9 @@ static void hook_4g_thread(void *a, void *b, void *c)
 			}
 			rx_block.len = take;
 
-			hook_health_report(HOOK_HEALTH_EVENT_4G);
 			hook_4g_process_block(&rx_block);
 		}
 
-		hook_4g_keepalive();
 		hook_4g_at_exchange_timeout_check();
 
 		if (hook_4g_rx_drops_isr != 0U) {

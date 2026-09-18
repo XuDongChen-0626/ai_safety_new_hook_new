@@ -32,13 +32,19 @@ LOG_MODULE_REGISTER(hook_alarm, CONFIG_LOG_DEFAULT_LEVEL);
 
 /*
  * When the module does not answer, every command costs ~1 s (Modbus wait
- * timeout). Retry at most once per second so a missing module cannot flood
- * the RS485 bus or starve the blink engine.
+ * timeout). Repeating the *same failed* value is limited to one attempt per
+ * second so a missing module cannot flood the RS485 bus or starve the blink
+ * engine. A *new* value is always sent immediately, see
+ * hook_alarm_volume_sync().
  */
 #define HOOK_ALARM_RETRY_INTERVAL_MS 1000U
 
-/* Number of consecutive write failures before the module is offline. */
-#define HOOK_ALARM_OFFLINE_FAILS 3U
+/*
+ * Liveness poll period used while the volume register does not change and the
+ * flash light is idle: without it a quiet system would never talk to the
+ * module and the offline detection would raise a false alarm.
+ */
+#define HOOK_ALARM_LIVENESS_PERIOD_MS 5000U
 
 /*
  * The alarm module no longer drives its own slow-flash pattern: the
@@ -62,9 +68,11 @@ static modbus_t hook_alarm_telegram = {
 };
 
 static uint16_t hook_alarm_volume_now;
-static uint16_t hook_alarm_volume_last;
+/* Last volume value the module confirmed (0xFFFF = nothing confirmed yet). */
+static uint16_t hook_alarm_volume_sent;
+/* Last volume value we tried to send, confirmed or not. */
+static uint16_t hook_alarm_volume_attempt;
 static bool hook_alarm_led_online;
-static uint32_t hook_alarm_last_volume_attempt_ms;
 static uint32_t hook_alarm_last_led_retry_ms;
 
 static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
@@ -79,13 +87,34 @@ static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
 
 void hook_alarm_force_volume_sync(void)
 {
-	/* Any value different from the current register forces a write. */
-	hook_alarm_volume_last = 0xFFFFU;
+	/* Forget both the confirmed and the attempted value, so the next sync
+	 * sends the current register value immediately.
+	 */
+	hook_alarm_volume_sent = 0xFFFFU;
+	hook_alarm_volume_attempt = 0xFFFFU;
 }
 
 bool hook_alarm_led_is_online(void)
 {
 	return hook_alarm_led_online;
+}
+
+/*
+ * Any answered request proves that the module is alive: report it to the
+ * health service (app/hook_health), which owns the online/offline decision and
+ * the ERR_LED_OFFLINE bit in its event callbacks. This module only reports
+ * successes and logs the failures.
+ */
+static void hook_alarm_report_online(void)
+{
+	hook_alarm_led_online = true;
+	hook_health_report(HOOK_HEALTH_EVENT_ALARM);
+}
+
+static void hook_alarm_log_failure(const char *what)
+{
+	hook_alarm_led_online = false;
+	LOG_ERR_RATELIMIT("alarm module %s failed", what);
 }
 
 /*
@@ -119,7 +148,7 @@ static void hook_alarm_buzzer_logic(void)
 		}
 	}
 
-	current_mode = hook_reg_get(STATUS_BUZZER);
+	current_mode = hook_reg_input_get(STATUS_BUZZER);
 
 	if (raw_target_mode == 0U && current_mode == 0U) {
 		return;
@@ -132,7 +161,7 @@ static void hook_alarm_buzzer_logic(void)
 			return;
 		}
 		LOG_INF("3 m siren triggered");
-		hook_reg_set(STATUS_BUZZER, 2U);
+		hook_reg_input_set(STATUS_BUZZER, 2U);
 		state = BUZZER_STATE_BUSY;
 		busy_start_ms = hook_get_time_ms();
 	} else if (raw_target_mode == 1U) {
@@ -142,7 +171,7 @@ static void hook_alarm_buzzer_logic(void)
 			return;
 		}
 		LOG_INF("7 m siren triggered");
-		hook_reg_set(STATUS_BUZZER, 1U);
+		hook_reg_input_set(STATUS_BUZZER, 1U);
 		state = BUZZER_STATE_BUSY;
 		busy_start_ms = hook_get_time_ms();
 	} else {
@@ -152,23 +181,22 @@ static void hook_alarm_buzzer_logic(void)
 			return;
 		}
 		LOG_INF("sound stopped");
-		hook_reg_set(STATUS_BUZZER, 0U);
+		hook_reg_input_set(STATUS_BUZZER, 0U);
 	}
 }
 
 static void hook_alarm_led_logic(void)
 {
-	static uint8_t led_timeout_count;
 	static uint32_t last_step_ms;
 	static uint32_t led_step_counter;
 	static uint8_t current_physical_state = 0xFFU;
 	uint16_t cmd_led_switch = hook_reg_get(CMD_LED_SWITCH);
-	uint16_t status_buzzer = hook_reg_get(STATUS_BUZZER);
+	uint16_t status_buzzer = hook_reg_input_get(STATUS_BUZZER);
 	uint16_t error_code = hook_reg_get_error_bits();
 	uint32_t ret;
 
 	/* PWD_LED mirrors the Modbus flash-light command register, not the
-	 * relay state and not every blink phase.
+	 * supply state and not every blink phase.
 	 */
 	GPIO_WRITE(pwr_led_gpio, (cmd_led_switch == 1U));
 
@@ -203,24 +231,12 @@ static void hook_alarm_led_logic(void)
 							       CMD_LED_OFF);
 				if (ret == OP_OK_QUERY) {
 					current_physical_state = desired_state;
-					hook_reg_set(STATUS_LED_SWITCH, 1U);
-					hook_alarm_led_online = true;
-					led_timeout_count = 0U;
-
-					if ((error_code & ERR_LED_OFFLINE) != 0U) {
-						LOG_INF("alarm module reconnect, clearing offline error");
-						hook_reg_clear_error_bits(ERR_LED_OFFLINE);
-					}
-					hook_health_report(HOOK_HEALTH_EVENT_ALARM);
+					hook_reg_input_set(STATUS_LED_SWITCH, 1U);
+					hook_alarm_report_online();
 				} else {
-					hook_alarm_led_online = false;
-					if (led_timeout_count <
-					    HOOK_ALARM_OFFLINE_FAILS) {
-						led_timeout_count++;
-						LOG_ERR("LED write failed (%s), timeout count = %u",
-							(desired_state != 0U) ? "on" : "off",
-							led_timeout_count);
-					}
+					hook_alarm_log_failure(
+						(desired_state != 0U) ? "LED on write" :
+									"LED off write");
 				}
 			}
 		}
@@ -237,57 +253,83 @@ static void hook_alarm_led_logic(void)
 		if (ret == OP_OK_QUERY) {
 			current_physical_state = 0U;
 			led_step_counter = 0U;
-			hook_reg_set(STATUS_LED_SWITCH, 0U);
-			hook_alarm_led_online = true;
-			led_timeout_count = 0U;
-
-			if ((error_code & ERR_LED_OFFLINE) != 0U) {
-				LOG_INF("alarm module reconnect, clearing offline error");
-				hook_reg_clear_error_bits(ERR_LED_OFFLINE);
-			}
-			hook_health_report(HOOK_HEALTH_EVENT_ALARM);
+			hook_reg_input_set(STATUS_LED_SWITCH, 0U);
+			hook_alarm_report_online();
 		} else {
-			hook_alarm_led_online = false;
-			if (led_timeout_count < HOOK_ALARM_OFFLINE_FAILS) {
-				led_timeout_count++;
-				LOG_ERR("LED off write failed, timeout count = %u",
-					led_timeout_count);
-			}
-		}
-	}
-
-	if (led_timeout_count >= HOOK_ALARM_OFFLINE_FAILS) {
-		if ((hook_reg_get_error_bits() & ERR_LED_OFFLINE) == 0U) {
-			LOG_ERR("alarm module offline (>= %u write timeouts)",
-				HOOK_ALARM_OFFLINE_FAILS);
-			hook_reg_set_error_bits(ERR_LED_OFFLINE);
+			hook_alarm_log_failure("LED off write");
 		}
 	}
 }
 
+/*
+ * Volume synchronisation and alarm module liveness.
+ *
+ * The volume register is the only exchange that is wanted even when nothing
+ * is alarming, so it also carries the liveness check-in. Rules:
+ *
+ *   1. A new volume value is sent immediately - no rate limit on a value
+ *      change, it may have to reach the module right away.
+ *   2. Whatever happens, the controller talks to the module at least once
+ *      every 3 s: after every exchange (value change or not) the keepalive
+ *      timer restarts, so the maximum interval between two exchanges is 3 s.
+ *      The keepalive is an idempotent write of the value already in use (a
+ *      register read is not guaranteed to be supported by this module).
+ *   3. Only repeating the *same failed* value is limited to one attempt per
+ *      second: an unanswered Modbus attempt blocks this thread for ~1 s
+ *      (MODBUS_WAIT_TIMEOUT_MS), so retrying faster would only starve the
+ *      blink engine and flood the RS485 bus.
+ *
+ * A failed exchange is logged and (because it does not report success) lets
+ * the health service's 15 s event timeout declare the module offline - so a
+ * quiet system can no longer look offline just because nothing had to be sent.
+ */
 static void hook_alarm_volume_sync(void)
 {
+	static uint32_t last_attempt_ms;
+	static uint32_t last_exchange_ms;
+	uint32_t now = hook_get_time_ms();
 	uint32_t ret;
 
 	hook_alarm_volume_now = hook_reg_get(CMD_VOLUME);
 
-	if (hook_alarm_volume_now == hook_alarm_volume_last) {
+	if (hook_alarm_volume_now != hook_alarm_volume_sent) {
+		bool repeating_same_failed_value =
+			(hook_alarm_volume_now == hook_alarm_volume_attempt);
+
+		/* Rule 1/3: a new value goes out at once, only the retry of the
+		 * same (still unconfirmed) value is slowed down.
+		 */
+		if (repeating_same_failed_value &&
+		    ((now - last_attempt_ms) < HOOK_ALARM_RETRY_INTERVAL_MS)) {
+			return;
+		}
+
+		last_attempt_ms = now;
+		last_exchange_ms = now;
+		hook_alarm_volume_attempt = hook_alarm_volume_now;
+
+		ret = hook_alarm_write(REG_VOLUME_CTRL, hook_alarm_volume_now);
+		if (ret == OP_OK_QUERY) {
+			LOG_DBG("alarm volume set to %u", hook_alarm_volume_now);
+			hook_alarm_volume_sent = hook_alarm_volume_now;
+			hook_alarm_report_online();
+		} else {
+			hook_alarm_log_failure("volume write");
+		}
 		return;
 	}
 
-	if ((hook_get_time_ms() - hook_alarm_last_volume_attempt_ms) <
-	    HOOK_ALARM_RETRY_INTERVAL_MS) {
+	/* Rule 2: value already in sync, keep the link supervised. */
+	if ((now - last_exchange_ms) < HOOK_ALARM_LIVENESS_PERIOD_MS) {
 		return;
 	}
-	hook_alarm_last_volume_attempt_ms = hook_get_time_ms();
+	last_exchange_ms = now;
 
 	ret = hook_alarm_write(REG_VOLUME_CTRL, hook_alarm_volume_now);
 	if (ret == OP_OK_QUERY) {
-		LOG_DBG("alarm volume set to %u", hook_alarm_volume_now);
-		hook_alarm_volume_last = hook_alarm_volume_now;
+		hook_alarm_report_online();
 	} else {
-		LOG_ERR_RATELIMIT("volume write failed (module offline?): %u",
-				  hook_alarm_volume_now);
+		hook_alarm_log_failure("keepalive write");
 	}
 }
 
@@ -314,8 +356,8 @@ static void hook_alarm_power_on_self_test(void)
 	(void)hook_alarm_write(0x6003U, 0x0000U);
 	GPIO_WRITE(pwr_led_gpio, 0);
 
-	hook_reg_set(STATUS_LED_SWITCH, 0U);
-	hook_reg_set(STATUS_BUZZER, 0U);
+	hook_reg_input_set(STATUS_LED_SWITCH, 0U);
+	hook_reg_input_set(STATUS_BUZZER, 0U);
 
 	LOG_INF("[POST] alarm module self test done");
 }
@@ -333,9 +375,12 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 	hook_alarm_power_on_self_test();
 
 	for (;;) {
-		if (is_soft_standby != 1U) {
-			hook_health_task_alive(HOOK_TASK_ALIVE_ALARM);
+		/* Liveness check-in first: it must happen in soft standby too,
+		 * where only the alarm logic itself is parked (see hook_health.h).
+		 */
+		hook_health_task_alive(HOOK_TASK_ALIVE_ALARM);
 
+		if (is_soft_standby != 1U) {
 			hook_alarm_volume_sync();
 
 			/* The blink pattern has its own 250 ms stepper and is

@@ -72,7 +72,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
    | slot0 | 0x08020000 | 896 KiB | 运行镜像（bank1，可用 655,024 B） |
    | slot1 | 0x08100000 | 768 KiB | 下载镜像（**全部位于 bank2**） |
    | coredump | 0x081C0000 | 128 KiB | 故障转储 |
-   | app-storage | 0x081E0000 | 128 KiB | 预留 |
+   | app-storage | 0x081E0000 | 128 KiB | 预留（持久化寄存器已迁到板载 QSPI Flash） |
 
    slot1 对齐到 bank2 边界是刻意的：App 从 bank1 运行、擦写 bank2 时
    不触发 STM32H7 的“读-写同 Bank 停顿”，OTA 期间其他线程仍能正常调度。

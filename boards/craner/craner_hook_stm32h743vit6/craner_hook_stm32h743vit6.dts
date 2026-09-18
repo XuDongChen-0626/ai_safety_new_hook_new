@@ -10,7 +10,7 @@
  *   uart5  (PB6/PB5,  115200) : shell / console / printf
  *   usart1 (PA9/PA10, 115200) : 4G / cloud transparent module (usr.cn)
  *   usart2 (PD5/PD6,  9600)   : spare (initialised but unused in the old fw)
- *   usart3 (PD8/PD9,  115200) : GPS (NMEA RMC time source)
+ *   usart3 (PD8/PD9,  115200) : spare (no GPS module on this product)
  *   usart6 (PC6/PC7,  9600)   : RS485 - BMS Modbus RTU master
  *   uart7  (PE8/PE7,  9600)   : RS485 - sound & light alarm module master
  *   uart8  (PE1/PE0,  9600)   : RS485 - host controller Modbus RTU slave
@@ -41,13 +41,11 @@
 		watchdog0 = &iwdg;
 		/* LEDs */
 		heartbeat-led = &heartbeat_led;
-		activity-led = &activity_led;
 		pwr-led = &pwr_led;
 		/* Hook actuator / power outputs */
-		relay-en = &relay_en;
+		alarm-power-en = &alarm_power_en;
 		power-3v = &power_3v;
 		power-5v = &power_5v;
-		gps-en = &gps_en;
 		modem-power = &modem_power;
 		modem-reset = &modem_reset;
 		modem-reload = &modem_reload;
@@ -62,22 +60,21 @@
 			label = "HEART_LED";
 		};
 
-		/* PE10: board LED, set when the application starts. */
-		activity_led: activity-led {
-			gpios = <&gpioe 10 GPIO_ACTIVE_HIGH>;
-			label = "LED2";
-		};
-
-		/* PB3: relay state feedback LED. */
+		/* PB3: mirrors the Modbus flash-light command register (driven by
+		 * app/hook_alarm / app/hook_heartbeat, not the supply enable).
+		 */
 		pwr_led: pwr-led {
 			gpios = <&gpiob 3 GPIO_ACTIVE_HIGH>;
 			label = "PWD_LED";
 		};
 
-		/* PE5: heartbeat supervision relay for the flash light. */
-		relay_en: relay-en {
+		/* PE5: supply enable of the sound & light alarm ("警报灯供电使能"
+		 * on the schematic, FLASH_LIGHT_POWER_EN in the .ioc). The host
+		 * heartbeat supervision cuts it after 60 s of silence.
+		 */
+		alarm_power_en: alarm-power-en {
 			gpios = <&gpioe 5 GPIO_ACTIVE_HIGH>;
-			label = "FLASH_LIGHT_POWER_EN";
+			label = "ALARM_POWER_EN";
 		};
 
 		/* Load switches (same pinout as the craner general board). */
@@ -89,12 +86,6 @@
 		power_5v: power-5v {
 			gpios = <&gpioc 13 GPIO_ACTIVE_HIGH>;
 			label = "POWER_5V";
-		};
-
-		/* PB14: GPS module enable (high = working). */
-		gps_en: gps-en {
-			gpios = <&gpiob 14 GPIO_ACTIVE_HIGH>;
-			label = "GPS_EN";
 		};
 
 		/* PA15: 4G module 3.3 V rail. */
@@ -122,12 +113,16 @@
  *   0x08020000..0x080FFFFF : slot0 - running image (896 KiB, flash bank 1)
  *   0x08100000..0x081BFFFF : slot1 - update image  (768 KiB, flash bank 2)
  *   0x081C0000..0x081DFFFF : coredump partition
- *   0x081E0000..0x081FFFFF : application storage
+ *   0x081E0000..0x081FFFFF : app storage (reserved)
  *
  * slot1 is deliberately aligned to the flash bank 2 boundary: the running
  * application executes from bank 1, so an application-side OTA download can
  * erase/program slot1 in bank 2 without stalling the core (STM32H7 read
  * while write restriction). This is the same layout as craner_ai_safety_car.
+ *
+ * Everything that has to be written at runtime (persistent registers today,
+ * device parameters / offline logs later) lives on the on-board W25Q64 QSPI
+ * NOR flash, so the internal flash keeps its OTA layout untouched.
  */
 &flash0 {
 	partitions {
@@ -158,6 +153,59 @@
 		app_storage_partition: partition@1e0000 {
 			label = "app-storage";
 			reg = <0x001e0000 0x00020000>;
+		};
+	};
+};
+
+/*
+ * On-board W25Q64JVSSIQ (8 MiB QSPI NOR, U12 on the core board schematic:
+ * PB10 NCS, PB2 CLK, PD11 IO0, PD12 IO1, PD13 IO2, PE2 IO3).
+ *
+ * Partitioning follows craner_ai_safety_car:
+ *   0x000000..0x01FFFF : device parameter store (Zephyr Settings/ZMS)
+ *   0x020000..0x021FFF : persistent Modbus registers (modbus_data_model),
+ *                        two 4 KiB banks, i.e. one NOR sector per bank
+ *   0x022000..0x7FFFFF : reserve (offline logs / future use)
+ */
+&quadspi {
+	pinctrl-0 = <&quadspi_bk1_io0_pd11
+		     &quadspi_bk1_io1_pd12
+		     &quadspi_bk1_io2_pe2
+		     &quadspi_bk1_io3_pd13
+		     &quadspi_bk1_ncs_pb10
+		     &quadspi_clk_pb2>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	w25q64: qspi-nor-flash@0 {
+		compatible = "st,stm32-qspi-nor";
+		reg = <0>;
+		/* st,stm32-qspi-nor size property is in BITS: 8 MiB = 64 Mbit. */
+		size = <DT_SIZE_M(64)>;
+		qspi-max-frequency = <40000000>;
+		spi-bus-width = <4>;
+		writeoc = "PP_1_1_4";
+		status = "okay";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			param_store_partition: partition@0 {
+				label = "param-store";
+				reg = <0x00000000 0x00020000>;
+			};
+
+			modbus_store_partition: partition@20000 {
+				label = "modbus-store";
+				reg = <0x00020000 0x00002000>;
+			};
+
+			reserve_partition: partition@22000 {
+				label = "reserve";
+				reg = <0x00022000 0x007de000>;
+			};
 		};
 	};
 };
@@ -256,12 +304,14 @@
 	status = "okay";
 };
 
-/* GPS (NMEA time source). */
+/* Spare port: the GPS module was removed from this product, the RTC is
+ * calibrated over Modbus RTU / MQTT instead.
+ */
 &usart3 {
 	pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
 	pinctrl-names = "default";
 	current-speed = <115200>;
-	status = "okay";
+	status = "disabled";
 };
 
 /* RS485 - BMS Modbus RTU master. */

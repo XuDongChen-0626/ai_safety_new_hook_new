@@ -15,11 +15,11 @@ extern "C" {
 extern modbusHandler_t hook_host_slave;
 
 /*
- * Bind the slave to the register store of app/hook_modbus and start the
- * RTU server thread.
+ * Start the RTU server thread. Holding and input registers are served from
+ * the register table of app/hook_modbus (module/modbus_data_model) through
+ * the hook_reg_model_* callbacks.
  */
-void hook_modbus_slave_init(uint16_t *holding_regs, uint16_t *input_regs,
-			    uint16_t reg_count, uint8_t slave_id);
+void hook_modbus_slave_init(uint16_t reg_count, uint8_t slave_id);
 
 #ifdef __cplusplus
 }

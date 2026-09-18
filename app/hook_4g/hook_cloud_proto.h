@@ -29,7 +29,7 @@ extern "C" {
 #define CMD_ID_WORK_MODE     0x06U /* work mode (read only)        */
 #define CMD_ID_SLEEP_EN      0x07U /* soft standby enable          */
 #define CMD_ID_SLEEP_TIME    0x08U /* power on/off schedule        */
-#define CMD_ID_CURRENT_TIME  0x09U /* RTC hh:mm                    */
+#define CMD_ID_CURRENT_TIME  0x09U /* RTC date/time (calibration)  */
 #define CMD_ID_SYS_ERROR     0xF0U /* system error code            */
 
 /* Reply IDs (device -> cloud), request id | 0x80 on error. */

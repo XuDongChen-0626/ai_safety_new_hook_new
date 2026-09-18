@@ -17,12 +17,10 @@ extern "C" {
 #define GPIO_SPEC_ALIAS(alias) GPIO_DT_SPEC_GET(DT_ALIAS(alias), gpios)
 
 static const struct gpio_dt_spec heartbeat_led_gpio = GPIO_SPEC_ALIAS(heartbeat_led);
-static const struct gpio_dt_spec activity_led_gpio = GPIO_SPEC_ALIAS(activity_led);
 static const struct gpio_dt_spec pwr_led_gpio = GPIO_SPEC_ALIAS(pwr_led);
-static const struct gpio_dt_spec relay_en_gpio = GPIO_SPEC_ALIAS(relay_en);
+static const struct gpio_dt_spec alarm_power_en_gpio = GPIO_SPEC_ALIAS(alarm_power_en);
 static const struct gpio_dt_spec power_3v_gpio = GPIO_SPEC_ALIAS(power_3v);
 static const struct gpio_dt_spec power_5v_gpio = GPIO_SPEC_ALIAS(power_5v);
-static const struct gpio_dt_spec gps_en_gpio = GPIO_SPEC_ALIAS(gps_en);
 static const struct gpio_dt_spec modem_power_gpio = GPIO_SPEC_ALIAS(modem_power);
 static const struct gpio_dt_spec modem_reset_gpio = GPIO_SPEC_ALIAS(modem_reset);
 static const struct gpio_dt_spec modem_reload_gpio = GPIO_SPEC_ALIAS(modem_reload);

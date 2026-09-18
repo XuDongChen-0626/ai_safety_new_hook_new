@@ -172,6 +172,20 @@ typedef struct
     uint16_t *u16inputregs;
     uint16_t u16inputregsize;
 
+    /*
+     * Optional register access callbacks (Zephyr port extension).
+     *
+     * When set they take precedence over u16regs / u16inputregs, so a slave
+     * can serve its registers from a register database (e.g.
+     * module/modbus_data_model) instead of a flat array. The callbacks must
+     * return 0 on success and a negative errno on failure; a failed read is
+     * answered with 0, a failed write is discarded. Coils keep using u16regs.
+     */
+    int8_t (*reg_read_cb)(uint16_t address, uint16_t *value, void *user_data);
+    int8_t (*reg_write_cb)(uint16_t address, uint16_t value, void *user_data);
+    int8_t (*input_read_cb)(uint16_t address, uint16_t *value, void *user_data);
+    void *reg_user_data;
+
     /* Zephyr kernel objects */
     modbus_queue_t QueueTelegramHandle;   /* master telegram queue */
     struct k_thread myTaskModbusAThread;  /* modbus task */

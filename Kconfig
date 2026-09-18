@@ -4,6 +4,7 @@ rsource "module/system_health_service/Kconfig"
 rsource "module/time_manager_service/Kconfig"
 rsource "module/ota_manager_service/Kconfig"
 rsource "module/fault_dump_service/Kconfig"
+rsource "module/modbus_data_model/Kconfig"
 
 menu "Craner AI safety hook application"
 
@@ -22,28 +23,25 @@ config HOOK_4G_ENABLE
 	  Enables the usr.cn transparent bridge handling, the craner#AT command
 	  surface and the binary 0xA5 cloud protocol.
 
-config HOOK_GPS_ENABLE
-	bool "GPS NMEA time source on usart3"
-	default y
-	help
-	  Parse NMEA RMC sentences with component/nmea and use them to set the
-	  internal RTC once per boot.
-
 config HOOK_HARD_STANDBY_ENABLE
 	bool "Allow STM32 hard standby (RTC alarm B wakeup)"
 	default y
 	help
 	  When enabled, the RTC power schedule may put the MCU into STM32
 	  STANDBY and wake it up with RTC alarm B at the configured power-on
-	  time. Requires a trusted RTC time (GPS sync or host calibration).
+	  time. Requires a trusted RTC time (host Modbus RTU or cloud
+	  calibration).
 
-config HOOK_HEARTBEAT_RELAY_ENABLE
-	bool "Host heartbeat supervision relay"
+config HOOK_HOST_HEARTBEAT_ENABLE
+	bool "Host heartbeat supervision (alarm-light supply)"
 	default y
 	help
-	  Drives FLASH_LIGHT_POWER_EN/PWD_LED from the host heartbeat register
-	  (register 104). Silence >10 s clears the alarm outputs, silence
-	  >60 s cuts the relay.
+	  Watches the host heartbeat counter (holding register 0x04, written by
+	  the crane host controller or the cloud over MQTT). Silence >10 s
+	  clears the alarm outputs; silence >60 s cuts the alarm-light supply
+	  (PE5, FLASH_LIGHT_POWER_EN in the .ioc) and sets
+	  ERR_HEARTBEAT_TIMEOUT. There is no relay on this board, the pin is the
+	  supply enable of the sound & light alarm.
 
 config HOOK_ALARM_MODULE_ENABLE
 	bool "External sound & light alarm module on uart7"
@@ -65,8 +63,8 @@ config HOOK_HEARTBEAT_TIMEOUT_MS
 	default 60000
 	range 1000 3600000
 	help
-	  After this silence the relay (FLASH_LIGHT_POWER_EN/PWD_LED) is turned
-	  off and ERR_HEARTBEAT_TIMEOUT is set in the error code register.
+	  After this silence the alarm-light supply (FLASH_LIGHT_POWER_EN) is
+	  turned off and ERR_HEARTBEAT_TIMEOUT is set in the error code register.
 
 config HOOK_LOW_BATTERY_THRESHOLD
 	int "Low battery warning threshold"
@@ -94,15 +92,6 @@ config HOOK_POWER_OFF_TIME_HHMM
 	range 0 65535
 	help
 	  0x1500 = 21:00 (same default as the old firmware).
-
-config HOOK_4G_KEEPALIVE_PERIOD_S
-	int "4G module keepalive period in seconds"
-	default 3600
-	range 60 86400
-	help
-	  Period of the periodic "usr.cn#AT+Z" keepalive that keeps the usr.cn
-	  transparent link to the MQTT broker alive (the old firmware sent it
-	  once per hour).
 
 config HOOK_OTA_ENABLE
 	bool "MQTT + Ymodem OTA into the MCUboot secondary slot"

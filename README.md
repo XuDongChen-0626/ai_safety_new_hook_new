@@ -16,13 +16,26 @@
 | 变更 | 本工程位置 |
 | --- | --- |
 | `CMD_LED_ON (0x0041)`：LED 常亮指令 | `src/system_def.h` |
-| `PWD_LED`(PB3) 上电默认**低**，且不再跟随继电器 | `src/board.c`、`app/hook_relay` |
+| `PWD_LED`(PB3) 上电默认**低**，且不再跟随声光供电 | `src/board.c`、`app/hook_heartbeat` |
 | 灯光改为软件闪烁：亮 2 s / 灭 1 s（8×250 ms / 4×250 ms），由本机下发 `0x0041`/`0x0060` | `app/hook_alarm` |
-| `PWD_LED` 镜像 `CMD_LED_SWITCH`（继电器状态由 `FLASH_LIGHT_POWER_EN` 单独表示） | `app/hook_alarm` |
+| `PWD_LED` 镜像 `CMD_LED_SWITCH`（声光供电由 `ALARM_POWER_EN` 单独控制） | `app/hook_alarm` |
 | 声光线程周期 100 ms → 50 ms，`led_logic()` 每轮执行 | `app/hook_alarm` |
 | 上电自检：播放测试音时 `PWD_LED` 亮，自检结束熄灭 | `app/hook_alarm` |
 | 云端 0x06 工作模式读应答改为 2 字节（`[mode, error_code]`），写请求错误码改为 `0x04` | `app/hook_4g/hook_cloud_proto.c` |
-| 软待机进入时 `PWD_LED` 熄灭 | `app/hook_gps/hook_rtc.c` |
+| 软待机进入时 `PWD_LED` 熄灭 | `app/hook_rtc/hook_rtc.c` |
+
+## 问题点汇总 1 的处理（本轮）
+
+`docs/问题点.md` 的清单 1 已逐条处理，详见
+[docs/问题点解答1.md](docs/问题点解答1.md)：
+
+| # | 问题 | 处理 |
+| --- | --- | --- |
+| 1 | `system_health_service` 检测哪些健康指标 | 已在解答文档中给出事件表与内核级检查清单 |
+| 2 | 4G 模块每小时重启一次 | **已删除**每小时 `usr.cn#AT+Z` 保活（`app/hook_4g`） |
+| 3 | 无 GPS；RTC 改由 Modbus/MQTT 校准；RTC 寄存器拆分；定时开关机完善 | GPS/NMEA 代码全部删除；新增 `app/hook_rtc`（校准命令 H0x20~0x22 + 当前时间 I0x10~0x12 + 区间式定时开关机） |
+| 4 | 寄存器表改用 `modbus_data_model` 子模块 | **已实现**：新增 `module/modbus_data_model` 子模块，寄存器表带名称/权限/默认值，定时开关机时间持久化到 `modbus-store` 分区 |
+| 5 | 删除无用的 `activity_led_gpio` | **已删除**（dts 节点/别名、`src/board.{c,h}`、`src/hook_task.c`） |
 
 ## 与旧工程的对应关系
 
@@ -35,8 +48,9 @@
 | `Com/am_modbus`（RTU 主/从机） | `component/am_modbus/`（Zephyr 移植版） |
 | `application/modbus_rtu_server_interface.c`（MB_Reg_* 寄存器） | `app/hook_modbus/`（寄存器存储 + 上位机 RTU 从机 + 两台 RTU 主机） |
 | `application/app_bms_alarm.c`（声光 / BMS） | `app/hook_alarm/` + `app/hook_bms/` |
-| `application/app_relay.c`（心跳继电器） | `app/hook_relay/` |
-| `application/gps_app.c`（GPS + RTC 定时开关机 + 待机） | `app/hook_gps/`（`hook_gps.c` + `hook_rtc.c`） |
+| `application/app_relay.c`（上位机心跳监督 + 声光供电） | `app/hook_heartbeat/` |
+| `application/gps_app.c` 的 RTC 定时开关机 / 待机部分 | `app/hook_rtc/`（GPS/NMEA 已随本产品取消） |
+| `application/modbus_rtu_server_interface.c` 的寄存器表 | `app/hook_modbus/hook_register.c`（`module/modbus_data_model` 表） |
 | `application/app_4g.c` + `at_protocol_handler.c` + `uart_manage_handler.c` | `app/hook_4g/`（`hook_cloud_proto.c` + `hook_at.c` + `hook_4g.c`） |
 | `application/app_sys_supervisor.c`（心跳灯动画 / 工作模式） | `app/hook_supervisor/` |
 | `application/app_4g.c` 中的错误码 / 看门狗打点（旧代码已注释） | `app/hook_health/` + `module/system_health_service`（IWDG 喂狗与任务打卡） |
@@ -51,7 +65,7 @@
 | --- | --- | --- | --- | --- |
 | 调试 / shell / 日志 / MCUmgr | uart5 | PB6/PB5 | 115200 | Zephyr console + shell |
 | 4G / 云端透传（usr.cn） | usart1 | PA9/PA10 | 115200 | `component/uart_manage` 通道 `"4g"` |
-| GPS（NMEA 授时） | usart3 | PD8/PD9 | 115200 | `component/uart_manage` 通道 `"gps"` |
+| 预留（原 GPS 口，本产品无 GPS 模块） | usart3 | PD8/PD9 | 115200 | 未启用（DTS `status = "disabled"`） |
 | 上位机 Modbus RTU 从机（RS485） | uart8 | PE1/PE0 | 9600 | `src/modbus_rtu_slave.c` |
 | BMS Modbus RTU 主机（RS485） | usart6 | PC6/PC7 | 9600 | `src/modbus_rtu_master.c` |
 | 声光报警模块 RTU 主机（RS485） | uart7 | PE8/PE7 | 9600 | `src/modbus_rtu_master.c` |
@@ -64,19 +78,20 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 
 | 线程 | 位置 | 周期 | 优先级（Zephyr，数字越小越高） |
 | --- | --- | --- | --- |
-| `RelayHeartbeat` | `app/hook_relay` | 100 ms（核心逻辑 1 s） | 1 |
+| `HostHeartbeat` | `app/hook_heartbeat` | 100 ms（核心逻辑 1 s） | 1 |
 | `AlarmTask` | `app/hook_alarm` | 100 ms（声光逻辑 500 ms） | 2 |
-| `App4GTask` | `app/hook_4g` | 事件驱动 + 每小时保活 | 2 |
+| `App4GTask` | `app/hook_4g` | 事件驱动（不再周期保活） | 2 |
 | `BmsMaster` | `app/hook_bms` | 100 ms（500 ms / 10 s 轮询） | 3 |
 | `TaskModbusSlave` / `TaskModbusMaster` | `component/am_modbus` | 事件驱动 | 3 |
-| `GPSStandby` | `app/hook_gps` | 100 ms（调度检查 1 s） | 4 |
+| `RtcPwrSched` | `app/hook_rtc` | 1 s（校准/时间发布；调度检查 5 s） | 4 |
 | `SysSupervisor` / `WorkModeTask` | `app/hook_supervisor` | 200 ms / 100 ms | 5 |
 | `HookHealth` | `app/hook_health` | 1 s | 6 |
 | `OtaTask` | `app/hook_ota` | 25 ms（事件驱动，Ymodem 接收 + slot1 写入） | 3 |
 
 ## 编译 / 烧录 / OTA
 
-`module/`（system_health / time_manager / ota_manager / fault_dump）与
+`module/`（system_health / time_manager / ota_manager / fault_dump /
+modbus_data_model）与
 `tool/zephyr-dev-workflow` 登记为 git 子模块（HKCRC 上游仓库，提交号固定在
 gitlink 中，`.gitmodules` 只给出仓库地址）。克隆本工程后先初始化子模块：
 
@@ -135,7 +150,7 @@ CMake 工程名 `craner_ai_safety_hook`。
 本机调试入口：
 
 ```text
-hook usr AT+Z         # 透传给 4G 模块：实际发送 "usr.cn#AT+Z\r\n"
+hook usr AT+Z         # 透传给 4G 模块（AT+Z 会让模块重启，仅供排查）
 hook usr usr.cn#AT+Z  # 已是完整命令时原样发送
 hook usr wk_mod       # 快捷查询：工作模式        (AT+WKMOD)
 hook usr mqtt_pub_tp  # 快捷查询：MQTT 发布话题   (AT+MQTTPUBTP)
@@ -151,6 +166,9 @@ hook ota start        # 手动进入接收态（等上位机发 Ymodem）
 hook ota cancel       # 中止
 hook ota info         # MCUboot 镜像信息 + OTA 会话状态
 hook ota confirm      # 确认当前镜像（等价 craner#AT+OTA_CONFIRM）
+hook rtc              # RTC 状态：I0x10~0x12 当前时间、H0x20~0x22 校准命令、trust
+hook rtc set 2026-09-16 14:30   # 写校准寄存器（等价上位机 Modbus 写 / 云端 0x09）
+hook reg i7           # 读输入寄存器 7（当前时间年），hook reg 113 读保持寄存器
 ```
 
 `hook usr` 发送的模块应答（以及模块主动输出的 `usr.cn#...` 行）都会打印在本控制台上，
@@ -204,13 +222,14 @@ craner#AT+SYSRESET   -> 冷复位
 ## 目录结构
 
 ```text
-app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_relay /
-            hook_gps / hook_4g / hook_ota / hook_supervisor / hook_health）
+app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_heartbeat /
+            hook_rtc / hook_4g / hook_ota / hook_supervisor / hook_health）
 boards/     自定义板级定义 craner_hook_stm32h743vit6
-component/  可移植组件（uart_manage / am_modbus / nmea）
+component/  可移植组件（uart_manage / am_modbus，Modbus 从机支持寄存器回调）
 config/     产品配置片段（Kconfig / sysbuild）
 docs/       迁移说明与寄存器映射
-module/     复用服务（system_health / time_manager / ota_manager / fault_dump）
+module/     复用服务（system_health / time_manager / ota_manager / fault_dump /
+            modbus_data_model）
 src/        平台层（main / board / hook_task / osal / Modbus 端口 / 待机 / shell）
 tool/       开发工作流脚本
 ```
@@ -229,34 +248,53 @@ tool/       开发工作流脚本
    | slot0 | 0x08020000 | 896 KiB | 运行镜像，应用可用 655,024 B（bank1） |
    | slot1 | 0x08100000 | 768 KiB | 下载镜像，**整块位于 bank2** |
    | coredump | 0x081C0000 | 128 KiB | 故障转储 |
-   | app-storage | 0x081E0000 | 128 KiB | 预留 |
+   | app-storage | 0x081E0000 | 128 KiB | 预留（内部 Flash 不再放运行时写入的分区） |
 
    slot1 对齐 bank2 是为了让“应用运行中写 slot1”不触发 STM32H7 同 Bank
-   读写停顿；与 `craner_ai_safety_car` 布局一致。当前固件约 150 KiB。
+   读写停顿；与 `craner_ai_safety_car` 布局一致。当前固件约 164 KiB
+   （app 168,184 B Flash / 124,560 B RAM，MCUboot 43,612 B）。
+
+   运行时需要写入的数据都在**板载 W25Q64（8 MiB QSPI NOR）**上，内部 Flash 只放
+   固件（与参考工程小车一致）：
+
+   | QSPI 分区 | 偏移 | 大小 | 用途 |
+   | --- | --- | --- | --- |
+   | param-store | 0x000000 | 128 KiB | 预留：设备参数（Settings/ZMS） |
+   | modbus-store | 0x020000 | 8 KiB | 持久化寄存器（`modbus_data_model`，两个 4 KiB bank） |
+   | reserve | 0x022000 | ~8 MiB | 预留：离线日志等 |
 3. **硬待机（STANDBY）**：需要 IWDG 在 Standby/Stop 下冻结的选项字节
    （旧固件 `AutoConfig_IWDG_OptionBytes()` 已写入 `IWDG_STDBY/STOP = FREEZE`）。
    Zephyr 侧不修改选项字节，量产工装需保证该配置。
 4. **看门狗**：旧固件（含最新版 `.ioc` 已移除 IWDG1 初始化）实际上没有启用
    看门狗，任务打卡喂狗代码也被注释；本工程用
    `module/system_health_service` + `app/hook_health` 恢复：5 个业务线程每轮打卡，
-   8 s 内没有完成一轮打卡则请求停止喂狗，IWDG（20 s）复位系统。
-   现场设备掉线（BMS / 声光 / 4G / GPS / 上位机心跳）只记录与上报错误码，不复位。
-   错误码寄存器（113）仍由检测到故障的模块单独写入（BMS / 声光 / 继电器各写自己的位），
+   12 s 内没有完成一轮打卡则请求停止喂狗，IWDG（30 s，`CONFIG_SYS_HEALTH_WDT_TIMEOUT_MS`）
+   复位系统。
+   现场设备掉线（BMS / 声光 / 4G / 上位机心跳）只记录与上报错误码，不复位。
+   错误码寄存器（输入寄存器 0x01）仍由检测到故障的模块单独写入（BMS / 声光 / 心跳监督各写自己的位），
    健康事件只做日志与告警，不重复改寄存器。
-5. **寄存器兼容**：上位机 Modbus RTU 寄存器地址与含义完全沿用旧固件
-   （0..255 保持寄存器 / 输入寄存器），见 `docs/寄存器映射.md`。
-6. **掉电保存**：与旧固件一致，定时开关机时间、音量、心跳使能等寄存器在每次
-   上电时恢复默认值。如需持久化可启用 `device_param_server`（Settings/ZMS）。
+5. **寄存器表（2026-09-17 重排）**：按读写方向划分 —— 云端/上位机**写**的东西放
+   保持寄存器（命令 0x00..、配置 0x10..、RTC 校准 0x20..），**读**的东西放输入
+   寄存器（状态 0x00..、当前时间 0x10..）。状态值对外只读，云端不可能误写；Modbus
+   RTU 只是调试口（上位机通过 MQTT/0xA5 访问设备状态），地址变化不影响云端协议。
+   详见 `docs/寄存器映射.md`。
+6. **寄存器实现**：寄存器表由 `module/modbus_data_model` 承载（名称 / 地址 /
+   读写权限 / 默认值），RTU 从机通过 `component/am_modbus` 的寄存器回调直接读写
+   该表；未在表中定义的地址读回 0、写被忽略。定时开关机时间（H0x10/H0x11）标记为
+   `PERSISTENT`，保存到 W25Q64 的 `modbus-store` 分区（偏移 0x20000，8 KiB）：
+   NOR 擦除单位 4 KiB，两个 bank 各自正好一个扇区，因此是**真正的双 bank** ——
+   保存过程中掉电只会退回上一份配置，不会丢配置。
 7. **配置文件名与内容**：`config/*.conf` 必须保持 ASCII 字符（PowerShell 开发
    工作流以系统 ANSI 代码页读写该文件，中文注释会导致行被破坏）。
 8. **4G 通道**：usr.cn 透传前缀（`1,` / `2,` / `3,` / `4,`）、二进制 0xA5 协议
    （CRC16-CCITT，小端）与旧固件一致；MCU 侧改为中断入队 + 线程解析，避免在
    串口回调（中断上下文）里做长逻辑。
-9. **GPS 授时更严格**：只有 RMC 定位有效（状态 `A`）时才把时间写入 RTC 并
-   建立 BBRAM 信任记录；无定位时 RTC 保持“不可信”，定时关机与硬待机不会执行
-   （安全优先；旧固件在无定位时也会写入 RTC）。
+9. **RTC 校准时序**：上位机（Modbus RTU 写 H0x20/0x21/0x22）或云端（0xA5 命令
+   0x09）只写“一次性校准命令”，由 `app/hook_rtc` 线程消费后再写 RTC 并重建
+   `time_manager` 信任记录；未校准（trust 无效）时定时关机与硬待机不执行。
+   部分写入的命令 60 s 后自动丢弃，避免半条命令被迟到补齐。
 10. **组件来源**：`module/`（system_health / time_manager / ota_manager /
-    fault_dump）与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**
+    fault_dump / modbus_data_model）与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**
     （`.gitmodules` + gitlink，提交号与参考工程 `craner_ai_safety_car` 一致），
     子模块 git 仓库位于 `.git/modules/...`，工作副本可直接离线编译。
     各依赖的上游地址、固定提交号，以及离线转换成子模块的完整步骤见

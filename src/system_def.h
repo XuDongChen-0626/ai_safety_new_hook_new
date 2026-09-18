@@ -3,7 +3,8 @@
  *
  * Ported from the original STM32CubeIDE firmware (crane_ai_satefy_hook.ioc):
  * thresholds, timezone, work-mode/error enums and external device constants.
- * The Modbus register map itself lives in app/hook_modbus/hook_register_map.h.
+ * The Modbus register map itself lives in app/hook_modbus/hook_register_map.h
+ * (registered as a data model table in app/hook_modbus/hook_register.c).
  *
  * Logging: the old printf-style LOGD/LOGI/LOGE macros are replaced by the
  * Zephyr logging subsystem. Every translation unit registers its own module
@@ -62,19 +63,6 @@ extern "C" {
 
 /* Number of holding registers served on the host RS485 bus. */
 #define REGS_TOTAL_NUM 256U
-
-/* ------------------------------------------------------------------ */
-/* GPS module variants (component/nmea parses the NMEA stream)         */
-/* ------------------------------------------------------------------ */
-#define TEST_GPS_NMEA_PARSER 0
-
-#define WT_RTK_UM982  1
-#define WT_GPS_UM626N 2
-#define WT_GPS_6N     3
-
-#ifndef GPS_TYPE_STD
-#define GPS_TYPE_STD WT_GPS_6N
-#endif
 
 /* ------------------------------------------------------------------ */
 /* RTC / standby                                                       */
@@ -148,14 +136,20 @@ typedef enum {
 
 /* ------------------------------------------------------------------ */
 /* Task alive mask (watchdog check-in, replaces g_task_alive_flags)    */
+/*                                                                     */
+/* A check-in means "this thread is running", NOT "this thread had     */
+/* work to do": every thread reports its bit unconditionally at the top */
+/* of its loop, also while the work itself is parked (soft standby).   */
+/* Mode dependent pauses are handled by hook_health_sleep_update() and */
+/* hook_health_ota_gate(), never by skipping the check-in.             */
 /* ------------------------------------------------------------------ */
 #define HOOK_TASK_ALIVE_ALARM  (1U << 0)
 #define HOOK_TASK_ALIVE_BMS    (1U << 1)
-#define HOOK_TASK_ALIVE_RELAY  (1U << 2)
-#define HOOK_TASK_ALIVE_GPS    (1U << 3)
+#define HOOK_TASK_ALIVE_HEARTBEAT (1U << 2)
+#define HOOK_TASK_ALIVE_RTC    (1U << 3)
 #define HOOK_TASK_ALIVE_4G     (1U << 4)
 #define HOOK_TASK_ALIVE_ALL    (HOOK_TASK_ALIVE_ALARM | HOOK_TASK_ALIVE_BMS | \
-				HOOK_TASK_ALIVE_RELAY | HOOK_TASK_ALIVE_GPS | \
+				HOOK_TASK_ALIVE_HEARTBEAT | HOOK_TASK_ALIVE_RTC | \
 				HOOK_TASK_ALIVE_4G)
 
 /* ------------------------------------------------------------------ */
@@ -164,7 +158,7 @@ typedef enum {
 extern volatile uint8_t is_power_sleep_flag; /* 1 = soft standby active */
 extern volatile uint8_t is_ota_updating;     /* 1 = OTA in progress */
 extern uint16_t hook_main_status;            /* 1 normal / 2 sleep / 3 error */
-extern volatile uint16_t is_soft_standby;    /* 1 = soft standby (relay off) */
+extern volatile uint16_t is_soft_standby;    /* 1 = soft standby (outputs off) */
 
 #ifdef __cplusplus
 }

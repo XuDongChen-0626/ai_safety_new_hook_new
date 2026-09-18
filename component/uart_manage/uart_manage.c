@@ -208,6 +208,19 @@ static void uart_manage_irq_handler(const struct device *dev, void *user_data)
       {
         m_obj->recv_buffer[m_obj->rx_idx++] = byte;
       }
+      else
+      {
+        /*
+         * Receive buffer full without an idle gap: deliver what has been
+         * collected (the CubeMX DMA version did the same - a full DMA buffer
+         * raised the callback with size == buffer size) instead of silently
+         * dropping every further byte until the next idle gap. The callback
+         * of this port is ISR safe by design: it only copies the frame into
+         * a ring buffer and queues its length.
+         */
+        uart_manage_rx_idle_handler(&m_obj->rx_idle_timer);
+        m_obj->recv_buffer[m_obj->rx_idx++] = byte;
+      }
       /* restart the idle timer for each byte */
       k_timer_start(&m_obj->rx_idle_timer, K_MSEC(m_obj->rx_idle_ms), K_NO_WAIT);
     }

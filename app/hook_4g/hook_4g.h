@@ -5,7 +5,9 @@
  *   - "<n>," prefixes added by the usr.cn module
  *   - craner#AT command surface (see hook_at.h)
  *   - binary 0xA5 cloud protocol (see hook_cloud_proto.h)
- *   - hourly "usr.cn#AT+Z" keepalive
+ *
+ * The old firmware also sent an hourly "usr.cn#AT+Z" link keep-alive; it is
+ * gone because the module restarts on that command (see hook_4g.c).
  */
 #ifndef HOOK_4G_H
 #define HOOK_4G_H

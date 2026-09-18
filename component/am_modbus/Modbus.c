@@ -434,7 +434,8 @@ void ModbusStart(modbusHandler_t * modH)
           	gpio_pin_set_dt(modH->en_gpio, 0);
           }
 
-          if (modH->uModbusType == MB_SLAVE &&  modH->u16regs == NULL )
+          if (modH->uModbusType == MB_SLAVE && modH->u16regs == NULL &&
+              modH->reg_read_cb == NULL )
           {
           	LOG_ERR("Define the DATA pointer shared through Modbus for slave mode");
           	return;
@@ -508,7 +509,8 @@ void ModbusStartCDC(modbusHandler_t * modH)
 {
 
 
-    if (modH->uModbusType == MB_SLAVE &&  modH->u16regs == NULL )
+    if (modH->uModbusType == MB_SLAVE && modH->u16regs == NULL &&
+        modH->reg_read_cb == NULL )
     {
     	LOG_ERR("Define the DATA pointer shared through Modbus for slave mode");
     	return;
@@ -1972,9 +1974,23 @@ int8_t process_FC3(modbusHandler_t *modH)
 
     for (i = u16StartAdd; i < u16StartAdd + u8regsno; i++)
     {
-    	modH->u8Buffer[ modH->u8BufferSize ] = highByte(modH->u16regs[i]);
+    	uint16_t u16value;
+
+    	if (modH->reg_read_cb != NULL)
+    	{
+    		if (modH->reg_read_cb(i, &u16value, modH->reg_user_data) != 0)
+    		{
+    			u16value = 0;
+    		}
+    	}
+    	else
+    	{
+    		u16value = modH->u16regs[i];
+    	}
+
+    	modH->u8Buffer[ modH->u8BufferSize ] = highByte(u16value);
     	modH->u8BufferSize++;
-    	modH->u8Buffer[ modH->u8BufferSize ] = lowByte(modH->u16regs[i]);
+    	modH->u8Buffer[ modH->u8BufferSize ] = lowByte(u16value);
     	modH->u8BufferSize++;
     }
     u8CopyBufferSize = modH->u8BufferSize +2;
@@ -1993,8 +2009,18 @@ static int8_t process_FC4(modbusHandler_t *modH)
     modH->u8BufferSize = 3;
 
     for (uint16_t i = u16StartAdd; i < u16StartAdd + u8regsno; i++) {
-        modH->u8Buffer[modH->u8BufferSize++] = highByte(modH->u16inputregs[i]);
-        modH->u8Buffer[modH->u8BufferSize++] = lowByte(modH->u16inputregs[i]);
+        uint16_t u16value;
+
+        if (modH->input_read_cb != NULL) {
+            if (modH->input_read_cb(i, &u16value, modH->reg_user_data) != 0) {
+                u16value = 0;
+            }
+        } else {
+            u16value = modH->u16inputregs[i];
+        }
+
+        modH->u8Buffer[modH->u8BufferSize++] = highByte(u16value);
+        modH->u8Buffer[modH->u8BufferSize++] = lowByte(u16value);
     }
     u8CopyBufferSize = modH->u8BufferSize + 2;
     sendTxBuffer(modH);
@@ -2050,7 +2076,14 @@ int8_t process_FC6(modbusHandler_t *modH )
     uint8_t u8CopyBufferSize;
     uint16_t u16val = word( modH->u8Buffer[ NB_HI ], modH->u8Buffer[ NB_LO ] );
 
-    modH->u16regs[ u16add ] = u16val;
+    if (modH->reg_write_cb != NULL)
+    {
+    	(void) modH->reg_write_cb(u16add, u16val, modH->reg_user_data);
+    }
+    else
+    {
+    	modH->u16regs[ u16add ] = u16val;
+    }
 
     // keep the same header
     modH->u8BufferSize = RESPONSE_SIZE;
@@ -2146,7 +2179,15 @@ int8_t process_FC16(modbusHandler_t *modH )
         		modH->u8Buffer[ (BYTE_CNT + 1) + i * 2 ],
 				modH->u8Buffer[ (BYTE_CNT + 2) + i * 2 ]);
 
-        modH->u16regs[ u16StartAdd + i ] = temp;
+        if (modH->reg_write_cb != NULL)
+        {
+        	(void) modH->reg_write_cb((uint16_t)(u16StartAdd + i), temp,
+        				  modH->reg_user_data);
+        }
+        else
+        {
+        	modH->u16regs[ u16StartAdd + i ] = temp;
+        }
     }
     u8CopyBufferSize = modH->u8BufferSize +2;
     sendTxBuffer(modH);

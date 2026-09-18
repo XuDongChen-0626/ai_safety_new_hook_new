@@ -22,7 +22,8 @@
 #include "hook_ota.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
-#include "hook_relay.h"
+#include "hook_heartbeat.h"
+#include "hook_rtc.h"
 #include "ota_manager_service.h"
 #include "system_def.h"
 #include "uart_manage_port.h"
@@ -31,63 +32,62 @@
 
 static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 {
-	int64_t unix_s;
 	struct rtc_time tm;
-	char time_text[48];
+	uint16_t cal_year;
+	uint16_t cal_month_day;
+	uint16_t cal_hhmm;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	(void)snprintf(time_text, sizeof(time_text), "unavailable");
-
-	if ((rtc_get_time(HOOK_SHELL_RTC, &tm) == 0) &&
-	    (timeutil_timegm64(&(struct tm){
-		     .tm_sec = tm.tm_sec, .tm_min = tm.tm_min,
-		     .tm_hour = tm.tm_hour, .tm_mday = tm.tm_mday,
-		     .tm_mon = tm.tm_mon, .tm_year = tm.tm_year,
-	     }) > 0)) {
-		struct tm utc = {
-			.tm_sec = tm.tm_sec, .tm_min = tm.tm_min,
-			.tm_hour = tm.tm_hour, .tm_mday = tm.tm_mday,
-			.tm_mon = tm.tm_mon, .tm_year = tm.tm_year,
-		};
-
-		unix_s = timeutil_timegm64(&utc);
-		if (unix_s > 0) {
-			(void)snprintf(time_text, sizeof(time_text),
-				       "%04u-%02u-%02u %02u:%02u:%02u UTC (RTC)",
-				       (unsigned int)(tm.tm_year + 1900),
-				       (unsigned int)(tm.tm_mon + 1),
-				       (unsigned int)tm.tm_mday,
-				       (unsigned int)tm.tm_hour,
-				       (unsigned int)tm.tm_min,
-				       (unsigned int)tm.tm_sec);
-		}
-	}
-
 	shell_print(sh, "work mode      : %u (1 normal, 2 standby, 3 error)",
-		    hook_reg_get(STATUS_WORK_MODE));
+		    hook_reg_input_get(STATUS_WORK_MODE));
 	shell_print(sh, "error code     : 0x%02X",
-		    hook_reg_get(REG_ERROR_CODE));
-	shell_print(sh, "relay          : %s",
-		    hook_relay_is_on() ? "on" : "off");
+		    hook_reg_input_get(REG_ERROR_CODE));
+	shell_print(sh, "alarm power    : %s",
+		    hook_heartbeat_alarm_power_is_on() ? "on" : "off");
 	shell_print(sh, "soft standby   : %u (register %u)", is_soft_standby,
 		    SOFT_STANDBY_ENABLE);
 	shell_print(sh, "heartbeat      : register %u = %u, enable = %u",
-		    STATUS_HEART_BEAT, hook_reg_get(STATUS_HEART_BEAT),
+		    CMD_HOST_HEARTBEAT, hook_reg_get(CMD_HOST_HEARTBEAT),
 		    hook_reg_get(HEARTBEAT_ENABLE));
 	shell_print(sh, "battery        : %u (low threshold %u)",
-		    hook_reg_get(STATUS_BMS_BATTERY), LOW_BATTERY_THRESHOLD);
+		    hook_reg_input_get(STATUS_BMS_BATTERY), LOW_BATTERY_THRESHOLD);
 	shell_print(sh, "alarm volume   : %u", hook_reg_get(CMD_VOLUME));
 	shell_print(sh, "ota            : %s (%u/%u B)",
 		    hook_ota_state_name(hook_ota_get_state()),
 		    hook_ota_bytes_received(), hook_ota_image_size());
 	shell_print(sh, "power schedule : on %02u:%02u off %02u:%02u (Beijing)",
-		    hook_reg_get(STATUS_POWER_ON_TIME) >> 8,
-		    hook_reg_get(STATUS_POWER_ON_TIME) & 0xFFU,
-		    hook_reg_get(STATUS_POWER_OFF_TIME) >> 8,
-		    hook_reg_get(STATUS_POWER_OFF_TIME) & 0xFFU);
-	shell_print(sh, "rtc            : %s", time_text);
+		    hook_reg_get(POWER_ON_TIME) >> 8,
+		    hook_reg_get(POWER_ON_TIME) & 0xFFU,
+		    hook_reg_get(POWER_OFF_TIME) >> 8,
+		    hook_reg_get(POWER_OFF_TIME) & 0xFFU);
+	shell_print(sh, "standby enable : soft=%u hard=%u",
+		    hook_reg_get(SOFT_STANDBY_ENABLE),
+		    hook_reg_get(STM32_STANDBY_ENABLE));
+
+	if (rtc_get_time(HOOK_SHELL_RTC, &tm) == 0) {
+		shell_print(sh, "rtc (UTC)      : %04d-%02d-%02d %02d:%02d:%02d",
+			    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			    tm.tm_hour, tm.tm_min, tm.tm_sec);
+	} else {
+		shell_print(sh, "rtc (UTC)      : unavailable");
+	}
+
+	cal_year = hook_reg_input_get(INPUT_RTC_YEAR);
+	cal_month_day = hook_reg_input_get(INPUT_RTC_MONTH_DAY);
+	cal_hhmm = hook_reg_input_get(INPUT_RTC_TIME_HHMM);
+
+	shell_print(sh, "rtc (Beijing)  : %04u-%02u-%02u %02u:%02u (I%u/I%u/I%u)",
+		    cal_year, (cal_month_day >> 8) & 0xFFU, cal_month_day & 0xFFU,
+		    (cal_hhmm >> 8) & 0xFFU, cal_hhmm & 0xFFU,
+		    INPUT_RTC_YEAR, INPUT_RTC_MONTH_DAY, INPUT_RTC_TIME_HHMM);
+	shell_print(sh, "rtc trusted    : %s",
+		    hook_rtc_trust_is_valid() ? "yes" : "no");
+	shell_print(sh, "rtc calibration: waiting for H%u=%04u H%u=%04X H%u=%04X",
+		    RTC_CAL_YEAR, hook_reg_get(RTC_CAL_YEAR),
+		    RTC_CAL_MONTH_DAY, hook_reg_get(RTC_CAL_MONTH_DAY),
+		    RTC_CAL_HHMM, hook_reg_get(RTC_CAL_HHMM));
 
 	return 0;
 }
@@ -96,13 +96,23 @@ static int cmd_hook_reg(const struct shell *sh, size_t argc, char **argv)
 {
 	long index;
 	char *end;
+	const char *text = argv[1];
+	bool is_input = false;
 
 	if ((argc < 2U) || (argc > 3U)) {
-		shell_error(sh, "usage: hook reg <index> [value]");
+		shell_error(sh, "usage: hook reg <index|i<index>> [value]");
 		return -EINVAL;
 	}
 
-	index = strtol(argv[1], &end, 0);
+	/* "hook reg i7" reads input register 7 (FC04 area, read only for the
+	 * host), "hook reg 113" the holding register 113 (FC03 area).
+	 */
+	if ((text[0] == 'i') || (text[0] == 'I')) {
+		is_input = true;
+		text++;
+	}
+
+	index = strtol(text, &end, 0);
 	if ((*end != '\0') || (index < 0) || (index >= (long)HOOK_REGISTER_COUNT)) {
 		shell_error(sh, "register index out of range (0..%u)",
 			    HOOK_REGISTER_COUNT - 1U);
@@ -110,9 +120,11 @@ static int cmd_hook_reg(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc == 2U) {
-		shell_print(sh, "reg[%ld] = %u (0x%04X)", index,
-			    hook_reg_get((uint16_t)index),
-			    hook_reg_get((uint16_t)index));
+		uint16_t value = is_input ? hook_reg_input_get((uint16_t)index) :
+					    hook_reg_get((uint16_t)index);
+
+		shell_print(sh, "%s[%ld] = %u (0x%04X)", is_input ? "input" : "reg",
+			    index, value, value);
 		return 0;
 	}
 
@@ -124,10 +136,17 @@ static int cmd_hook_reg(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 
-		hook_reg_set((uint16_t)index, (uint16_t)value);
-		shell_print(sh, "reg[%ld] <= %u (0x%04X)", index,
-			    hook_reg_get((uint16_t)index),
-			    hook_reg_get((uint16_t)index));
+		if (is_input) {
+			hook_reg_input_set((uint16_t)index, (uint16_t)value);
+			shell_print(sh, "input[%ld] <= %u (0x%04X)", index,
+				    hook_reg_input_get((uint16_t)index),
+				    hook_reg_input_get((uint16_t)index));
+		} else {
+			hook_reg_set((uint16_t)index, (uint16_t)value);
+			shell_print(sh, "reg[%ld] <= %u (0x%04X)", index,
+				    hook_reg_get((uint16_t)index),
+				    hook_reg_get((uint16_t)index));
+		}
 	}
 
 	return 0;
@@ -135,6 +154,117 @@ static int cmd_hook_reg(const struct shell *sh, size_t argc, char **argv)
 
 #define HOOK_SHELL_AT_LINE_MAX 128U
 #define HOOK_USR_PREFIX "usr.cn#"
+
+/* --- RTC bring-up helpers (no GPS on this product) ------------------ */
+
+static bool hook_shell_parse_long(const char **text, long min, long max,
+				  long *out)
+{
+	char *end;
+	long value;
+
+	if ((text == NULL) || (*text == NULL) || (out == NULL)) {
+		return false;
+	}
+
+	value = strtol(*text, &end, 10);
+	if ((end == *text) || (value < min) || (value > max)) {
+		return false;
+	}
+
+	*text = end;
+	*out = value;
+
+	return true;
+}
+
+/*
+ * hook rtc                                  - show the time state
+ * hook rtc set <YYYY-MM-DD> <HH:MM>          - write the calibration registers
+ *
+ * "set" only fills the one shot calibration registers (holding 119/120/121),
+ * exactly like a host Modbus write or the cloud 0x09 command; the RTC thread
+ * applies them within a second and re-creates the trust record. Bench tool,
+ * not a permanent host interface.
+ */
+static int cmd_hook_rtc(const struct shell *sh, size_t argc, char **argv)
+{
+	struct rtc_time tm;
+
+	if (argc == 1U) {
+		shell_print(sh, "display I%u=%04u I%u=%04X I%u=%04X (Beijing)",
+			    INPUT_RTC_YEAR, hook_reg_input_get(INPUT_RTC_YEAR),
+			    INPUT_RTC_MONTH_DAY,
+			    hook_reg_input_get(INPUT_RTC_MONTH_DAY),
+			    INPUT_RTC_TIME_HHMM,
+			    hook_reg_input_get(INPUT_RTC_TIME_HHMM));
+		shell_print(sh, "command H%u=%04u H%u=%04X H%u=%04X",
+			    RTC_CAL_YEAR, hook_reg_get(RTC_CAL_YEAR),
+			    RTC_CAL_MONTH_DAY, hook_reg_get(RTC_CAL_MONTH_DAY),
+			    RTC_CAL_HHMM, hook_reg_get(RTC_CAL_HHMM));
+		shell_print(sh, "trusted : %s",
+			    hook_rtc_trust_is_valid() ? "yes" : "no");
+		if (rtc_get_time(HOOK_SHELL_RTC, &tm) == 0) {
+			shell_print(sh, "internal: %04d-%02d-%02d %02d:%02d:%02d UTC",
+				    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+				    tm.tm_hour, tm.tm_min, tm.tm_sec);
+		}
+		return 0;
+	}
+
+	if ((argc != 4U) || (strcmp(argv[1], "set") != 0)) {
+		shell_error(sh, "usage: hook rtc | hook rtc set <YYYY-MM-DD> <HH:MM>");
+		return -EINVAL;
+	}
+
+	{
+		const char *p = argv[2];
+		long year;
+		long month;
+		long day;
+		long hour;
+		long minute;
+
+		if (!hook_shell_parse_long(&p, 2000, 2099, &year) || (*p != '-')) {
+			shell_error(sh, "invalid date '%s' (expected YYYY-MM-DD)", argv[2]);
+			return -EINVAL;
+		}
+		p++;
+		if (!hook_shell_parse_long(&p, 1, 12, &month) || (*p != '-')) {
+			shell_error(sh, "invalid date '%s' (expected YYYY-MM-DD)", argv[2]);
+			return -EINVAL;
+		}
+		p++;
+		if (!hook_shell_parse_long(&p, 1, 31, &day) || (*p != '\0')) {
+			shell_error(sh, "invalid date '%s' (expected YYYY-MM-DD)", argv[2]);
+			return -EINVAL;
+		}
+
+		p = argv[3];
+		if (!hook_shell_parse_long(&p, 0, 23, &hour) || (*p != ':')) {
+			shell_error(sh, "invalid time '%s' (expected HH:MM)", argv[3]);
+			return -EINVAL;
+		}
+		p++;
+		if (!hook_shell_parse_long(&p, 0, 59, &minute) || (*p != '\0')) {
+			shell_error(sh, "invalid time '%s' (expected HH:MM)", argv[3]);
+			return -EINVAL;
+		}
+
+		/* Year last: the RTC thread consumes the triple as soon as all
+		 * three registers differ from their "not written" default.
+		 */
+		hook_reg_set(RTC_CAL_MONTH_DAY,
+			     (uint16_t)(((uint16_t)month << 8) | (uint16_t)day));
+		hook_reg_set(RTC_CAL_HHMM,
+			     (uint16_t)(((uint16_t)hour << 8) | (uint16_t)minute));
+		hook_reg_set(RTC_CAL_YEAR, (uint16_t)year);
+	}
+
+	shell_print(sh, "calibration written, the RTC thread applies it in <1 s");
+
+	return 0;
+}
 
 /* Shortcuts for the module queries used most often during bring-up. */
 struct hook_usr_shortcut {
@@ -406,6 +536,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(status, NULL, "Show hook controller status.", cmd_hook_status),
 	SHELL_CMD_ARG(reg, NULL, "Read/write a Modbus register: reg <index> [value]",
 		      cmd_hook_reg, 2, 1),
+	SHELL_CMD_ARG(rtc, NULL,
+		      "RTC state / host calibration: rtc [set <YYYY-MM-DD> <HH:MM>]",
+		      cmd_hook_rtc, 1, 3),
 	SHELL_CMD_ARG(craner, NULL, "Run a craner#AT command: craner <command>",
 		      cmd_hook_craner, 2, 8),
 	SHELL_CMD_ARG(usr, NULL,

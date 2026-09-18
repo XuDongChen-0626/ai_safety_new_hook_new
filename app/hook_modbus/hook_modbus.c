@@ -14,11 +14,13 @@ LOG_MODULE_REGISTER(hook_modbus, CONFIG_LOG_DEFAULT_LEVEL);
 
 void hook_modbus_init(void)
 {
-	hook_reg_reset();
+	if (hook_register_init() != 0) {
+		LOG_ERR("register table bring-up failed, host slave not started");
+		return;
+	}
 
 	/* The hook is the RTU slave of the crane host controller (uart8). */
-	hook_modbus_slave_init(hook_reg_holding(), hook_reg_input(),
-			       HOOK_REGISTER_COUNT, FORWARD_SLAVE_ADDR);
+	hook_modbus_slave_init(HOOK_REGISTER_COUNT, FORWARD_SLAVE_ADDR);
 
 	/* External devices polled by this controller. */
 #if defined(CONFIG_HOOK_BMS_ENABLE) || defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)

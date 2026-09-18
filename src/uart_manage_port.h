@@ -3,7 +3,9 @@
  *
  * Zephyr interrupt-driven channels (component/uart_manage):
  *   "4g"  -> usart1 (PA9/PA10, 115200) : usr.cn transparent 4G module
- *   "gps" -> usart3 (PD8/PD9, 115200)  : GPS NMEA stream
+ *
+ * usart3 was the GPS port in the old firmware; this product has no GPS
+ * module, so the channel table only carries the 4G link.
  *
  * The RS485 Modbus ports (uart8 slave, usart6 + uart7 masters) and the debug
  * console (uart5) are owned by component/am_modbus and the Zephyr shell.

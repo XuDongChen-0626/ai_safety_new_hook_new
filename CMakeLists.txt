@@ -12,13 +12,14 @@ add_subdirectory(module/system_health_service)
 add_subdirectory(module/time_manager_service)
 add_subdirectory(module/ota_manager_service)
 add_subdirectory(module/fault_dump_service)
+add_subdirectory(module/modbus_data_model)
 
 # Hook product applications.
 add_subdirectory(app/hook_modbus)
 add_subdirectory(app/hook_alarm)
 add_subdirectory(app/hook_bms)
-add_subdirectory(app/hook_relay)
-add_subdirectory(app/hook_gps)
+add_subdirectory(app/hook_heartbeat)
+add_subdirectory(app/hook_rtc)
 add_subdirectory(app/hook_4g)
 add_subdirectory(app/hook_supervisor)
 add_subdirectory(app/hook_health)
@@ -28,12 +29,11 @@ target_include_directories(app PRIVATE
 	src
 	component/uart_manage
 	component/am_modbus
-	component/nmea
 	app/hook_modbus
 	app/hook_alarm
 	app/hook_bms
-	app/hook_relay
-	app/hook_gps
+	app/hook_heartbeat
+	app/hook_rtc
 	app/hook_4g
 	app/hook_supervisor
 	app/hook_health
@@ -54,7 +54,6 @@ target_sources(app PRIVATE
 	component/uart_manage/fifo.c
 	component/uart_manage/lwrb.c
 	component/am_modbus/Modbus.c
-	component/nmea/nmea.c
 )
 
 target_link_libraries(app PRIVATE
@@ -62,4 +61,5 @@ target_link_libraries(app PRIVATE
 	time_manager_service
 	ota_manager_service
 	fault_dump_service
+	modbus_data_model
 )

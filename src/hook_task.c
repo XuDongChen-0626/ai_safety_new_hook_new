@@ -10,11 +10,11 @@
 #include "hook_4g.h"
 #include "hook_alarm.h"
 #include "hook_bms.h"
-#include "hook_gps.h"
 #include "hook_health.h"
 #include "hook_modbus.h"
 #include "hook_ota.h"
-#include "hook_relay.h"
+#include "hook_heartbeat.h"
+#include "hook_rtc.h"
 #include "hook_supervisor.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
@@ -44,13 +44,11 @@ void init_app_hook_task(void)
 #if defined(CONFIG_HOOK_BMS_ENABLE)
 	hook_bms_start();
 #endif
-#if defined(CONFIG_HOOK_HEARTBEAT_RELAY_ENABLE)
-	hook_relay_init();
-	hook_relay_start();
+#if defined(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE)
+	hook_heartbeat_init();
+	hook_heartbeat_start();
 #endif
-#if defined(CONFIG_HOOK_GPS_ENABLE)
-	hook_gps_start();
-#endif
+	hook_rtc_start();
 #if defined(CONFIG_HOOK_4G_ENABLE)
 	hook_4g_init();
 	hook_4g_start();
@@ -61,9 +59,6 @@ void init_app_hook_task(void)
 #endif
 	hook_supervisor_start();
 	hook_health_task_start();
-
-	/* Board LED2 indicates a running application (old StartHeartbeatTask). */
-	GPIO_WRITE(activity_led_gpio, 1);
 
 	LOG_INF("[HOOK] application threads started");
 }

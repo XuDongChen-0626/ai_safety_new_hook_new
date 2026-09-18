@@ -75,11 +75,18 @@ static uint32_t hook_bms_query(hook_bms_read_idx_t idx)
 	return osal_notify_wait(&hook_bms_notify, MODBUS_WAIT_TIMEOUT_MS);
 }
 
-static void hook_bms_read_remaining_times(void)
+/*
+ * Fast BMS round (every 500 ms). Returns true when at least one query was
+ * answered; any answered exchange proves that the BMS is reachable and is
+ * what keeps the offline judgement (see hook_bms_thread) satisfied.
+ */
+static bool hook_bms_read_remaining_times(void)
 {
+	bool any_ok = false;
 	uint16_t value;
 
 	if (hook_bms_query(READ_REMAIN_DISCHARGE) == OP_OK_QUERY) {
+		any_ok = true;
 		value = hook_bms_read_results[READ_REMAIN_DISCHARGE];
 		if (value != 0xFFFFU) {
 			hook_bms_discharge_samples[hook_bms_discharge_idx %
@@ -94,7 +101,8 @@ static void hook_bms_read_remaining_times(void)
 	}
 
 	if (hook_bms_query(READ_PROTECT_STATUS) == OP_OK_QUERY) {
-		hook_reg_set(STATUS_BMS_PROTECT_STATUS,
+		any_ok = true;
+		hook_reg_input_set(STATUS_BMS_PROTECT_STATUS,
 			     hook_bms_read_results[READ_PROTECT_STATUS]);
 		LOG_DBG_RATELIMIT("BMS protect status = 0x%04X",
 				  hook_bms_read_results[READ_PROTECT_STATUS]);
@@ -103,6 +111,7 @@ static void hook_bms_read_remaining_times(void)
 	}
 
 	if (hook_bms_query(READ_REMAIN_CHARGE) == OP_OK_QUERY) {
+		any_ok = true;
 		value = hook_bms_read_results[READ_REMAIN_CHARGE];
 		if (value != 0xFFFFU) {
 			hook_bms_charge_samples[hook_bms_charge_idx %
@@ -115,6 +124,8 @@ static void hook_bms_read_remaining_times(void)
 	} else {
 		LOG_ERR_RATELIMIT("remaining charge time read failed");
 	}
+
+	return any_ok;
 }
 
 static uint16_t hook_bms_average(const uint32_t *samples, uint8_t count)
@@ -132,23 +143,24 @@ static uint16_t hook_bms_average(const uint32_t *samples, uint8_t count)
 	return (uint16_t)(sum / count);
 }
 
-static void hook_bms_read_slow_values(void)
+static bool hook_bms_read_slow_values(void)
 {
+	bool any_ok = false;
+
 	if (hook_bms_query(READ_BATT_LEVEL) == OP_OK_QUERY) {
-		hook_reg_set(STATUS_BMS_BATTERY,
+		any_ok = true;
+		hook_reg_input_set(STATUS_BMS_BATTERY,
 			     hook_bms_read_results[READ_BATT_LEVEL]);
-		hook_reg_clear_error_bits(ERR_BMS_READ_FAIL);
-		hook_health_report(HOOK_HEALTH_EVENT_BMS);
 		LOG_DBG_RATELIMIT("BMS battery level = %u",
 				  hook_bms_read_results[READ_BATT_LEVEL]);
 	} else {
 		LOG_ERR_RATELIMIT("BMS battery level read failed");
-		hook_reg_set(STATUS_BMS_BATTERY, 0U);
-		hook_reg_set_error_bits(ERR_BMS_READ_FAIL);
+		hook_reg_input_set(STATUS_BMS_BATTERY, 0U);
 	}
 
 	if (hook_bms_query(READ_TOTAL_VOLTAGE) == OP_OK_QUERY) {
-		hook_reg_set(STATUS_BMS_TOTAL_VOLTAGE,
+		any_ok = true;
+		hook_reg_input_set(STATUS_BMS_TOTAL_VOLTAGE,
 			     hook_bms_read_results[READ_TOTAL_VOLTAGE]);
 		LOG_DBG_RATELIMIT("BMS total voltage = %u",
 				  hook_bms_read_results[READ_TOTAL_VOLTAGE]);
@@ -157,28 +169,29 @@ static void hook_bms_read_slow_values(void)
 	}
 
 	if (hook_bms_query(READ_TOTAL_CURRENT) == OP_OK_QUERY) {
+		any_ok = true;
 		int16_t current = (int16_t)hook_bms_read_results[READ_TOTAL_CURRENT];
 
 		if (current < 0) {
-			hook_reg_set(STATUS_BMS_TOTAL_CURRENT,
+			hook_reg_input_set(STATUS_BMS_TOTAL_CURRENT,
 				     (uint16_t)(-(int32_t)current));
-			hook_reg_set(STATUS_BMS_IS_charge, 0U); /* discharging */
+			hook_reg_input_set(STATUS_BMS_IS_CHARGE, 0U); /* discharging */
 		} else if (current > 0) {
-			hook_reg_set(STATUS_BMS_TOTAL_CURRENT, (uint16_t)current);
-			hook_reg_set(STATUS_BMS_IS_charge, 1U); /* charging */
+			hook_reg_input_set(STATUS_BMS_TOTAL_CURRENT, (uint16_t)current);
+			hook_reg_input_set(STATUS_BMS_IS_CHARGE, 1U); /* charging */
 		} else {
-			hook_reg_set(STATUS_BMS_IS_charge, 2U); /* idle */
+			hook_reg_input_set(STATUS_BMS_IS_CHARGE, 2U); /* idle */
 		}
 		LOG_DBG_RATELIMIT("BMS current = %d, charging = %u", current,
-				  hook_reg_get(STATUS_BMS_IS_charge));
+				  hook_reg_input_get(STATUS_BMS_IS_CHARGE));
 	} else {
 		LOG_ERR_RATELIMIT("BMS total current read failed");
 	}
 
-	hook_reg_set(STATUS_BMS_REMAIN_DISCHARGE_TIME,
+	hook_reg_input_set(STATUS_BMS_REMAIN_DISCHARGE_TIME,
 		     hook_bms_average(hook_bms_discharge_samples,
 				      hook_bms_discharge_count));
-	hook_reg_set(STATUS_BMS_REMAIN_CHARGE_TIME,
+	hook_reg_input_set(STATUS_BMS_REMAIN_CHARGE_TIME,
 		     hook_bms_average(hook_bms_charge_samples,
 				      hook_bms_charge_count));
 
@@ -188,6 +201,8 @@ static void hook_bms_read_slow_values(void)
 	hook_bms_discharge_count = 0U;
 	hook_bms_charge_idx = 0U;
 	hook_bms_charge_count = 0U;
+
+	return any_ok;
 }
 
 static void hook_bms_thread(void *a, void *b, void *c)
@@ -203,22 +218,39 @@ static void hook_bms_thread(void *a, void *b, void *c)
 	osal_notify_register_current(&hook_bms_notify);
 
 	for (;;) {
-		if (is_soft_standby == 1U) {
-			k_msleep(100);
-			continue;
-		}
+		bool any_ok = false;
 
+		/* Check-in first: it means "this thread is alive", also while the
+		 * polling itself is parked in soft standby. A check-in must never
+		 * depend on whether the current mode has work to do, otherwise a
+		 * normal soft standby would look like a hung thread.
+		 */
 		hook_health_task_alive(HOOK_TASK_ALIVE_BMS);
+
+		/* The BMS keeps being polled in soft standby, exactly like the
+		 * CubeMX firmware (modbus_bms_handle() had no standby check): the
+		 * alarm outputs are off, but battery level / charge state stay
+		 * observable and the health service keeps supervising the BMS for
+		 * the whole standby window.
+		 */
 		now = hook_get_time_ms();
 
 		if (now - last_500ms >= 500U) {
 			last_500ms = now;
-			hook_bms_read_remaining_times();
+			any_ok = hook_bms_read_remaining_times();
 		}
 
 		if (now - last_10s >= 10000U) {
 			last_10s = now;
-			hook_bms_read_slow_values();
+			any_ok = hook_bms_read_slow_values() || any_ok;
+		}
+
+		/* Report every answered round. The online/offline decision (and
+		 * the ERR_BMS_READ_FAIL bit that goes with it) belongs to the
+		 * health service - see app/hook_health.
+		 */
+		if (any_ok) {
+			hook_health_report(HOOK_HEALTH_EVENT_BMS);
 		}
 
 		k_msleep(100);
