@@ -34,6 +34,12 @@ LOG_MODULE_REGISTER(hook_alarm, CONFIG_LOG_DEFAULT_LEVEL);
  */
 #define HOOK_ALARM_POST_SETTLE_MS 3000U
 
+/* Silence after the supply came back outside of the power-on self test (i.e.
+ * after a heartbeat timeout cut it): the module is booting again and its
+ * power-up noise would be taken for a Modbus answer.
+ */
+#define HOOK_ALARM_RESUME_SETTLE_MS 3000U
+
 /* Volume polling period of the outer loop. */
 #define HOOK_ALARM_LOGIC_PERIOD_MS 500U
 
@@ -90,6 +96,8 @@ static uint8_t hook_alarm_led_physical_state = 0xFFU;
  * Written by app/hook_heartbeat, read by the alarm thread.
  */
 static volatile bool hook_alarm_suspended;
+/* Earliest uptime at which Modbus may talk to the module again. */
+static volatile uint32_t hook_alarm_resume_after_ms;
 
 static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
 {
@@ -117,6 +125,10 @@ void hook_alarm_set_suspend(bool suspended)
 		hook_alarm_volume_sent = 0xFFFFU;
 		hook_alarm_volume_attempt = 0xFFFFU;
 		hook_alarm_led_physical_state = 0xFFU;
+	} else {
+		/* Supply is back: let the module boot before the first exchange. */
+		hook_alarm_resume_after_ms =
+			hook_get_time_ms() + HOOK_ALARM_RESUME_SETTLE_MS;
 	}
 }
 
@@ -423,7 +435,8 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 		 */
 		hook_health_task_alive(HOOK_TASK_ALIVE_ALARM);
 
-		if ((is_soft_standby != 1U) && !hook_alarm_suspended) {
+		if ((is_soft_standby != 1U) && !hook_alarm_suspended &&
+		    ((int32_t)(hook_get_time_ms() - hook_alarm_resume_after_ms) >= 0)) {
 			hook_alarm_volume_sync();
 
 			/* The blink pattern has its own 250 ms stepper and is

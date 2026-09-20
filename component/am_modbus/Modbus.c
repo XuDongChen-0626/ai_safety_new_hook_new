@@ -1250,6 +1250,7 @@ void StartTaskModbusMaster(void *argument1, void *argument2, void *argument3)
      // This is the case for implementations with only USART support
      SendQuery(modH, telegram);
      /* Block indefinitely until a Modbus Frame arrives or query timeouts*/
+wait_answer:
      ulNotificationValue = osal_notify_wait_forever(&modH->task_notify);
 
 #endif
@@ -1292,17 +1293,20 @@ void StartTaskModbusMaster(void *argument1, void *argument2, void *argument3)
 	// printf("\r\n");
 #endif
 	// check buffer size，if too small, return error
+	  /*
+	   * A buffer shorter than the smallest Modbus frame is not an answer: it
+	   * is the line noise a module emits while its supply comes up (or the
+	   * first fragment of the real answer). Wait for the rest instead of
+	   * failing the query - the query timeout still bounds the wait.
+	   *
+	   * Failing here immediately produced the "volume write failed" plus
+	   * "P:BAD_SIZE,size=1" pair every time the sound & light module was
+	   * powered up again after a heartbeat timeout.
+	   */
 	  if ( modH->u8BufferSize < 6){
-		  modH->i8state = COM_IDLE;
-		  modH->i8lastError = ERR_BAD_SIZE;
-		  modH->u16errCnt++;
-		  // Print a clear failure banner before dump
-		  LOG_WRN_RATELIMIT("P:BAD_SIZE,size=%u", (unsigned)modH->u8BufferSize);
-		  if (modH->u8BufferSize >= 2) {
-			  LOG_WRN_RATELIMIT("P:BAD_SIZE,id=0x%02X func=0x%02X", modH->u8Buffer[0], modH->u8Buffer[1]);
-		  }
-		  osal_notify_signal(telegram.notify, (uint32_t)modH->i8lastError);
-		  continue;
+		  LOG_WRN_RATELIMIT("P:SHORT,size=%u (still waiting for the answer)",
+				    (unsigned)modH->u8BufferSize);
+		  goto wait_answer;
 	  }
 
 	  k_timer_stop(&modH->xTimerTimeout); // cancel timeout timer

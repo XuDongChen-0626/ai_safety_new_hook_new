@@ -96,19 +96,6 @@ static void hook_link_stats_update(uint32_t gap_ms)
 	int64_t previous_beat_unix_s = hook_link_last_beat_unix_s;
 	int64_t now_unix_s = 0;
 
-	if (hook_link.received > 0U) {
-		if ((hook_link.interval_min_ms == 0U) ||
-		    (gap_ms < hook_link.interval_min_ms)) {
-			hook_link.interval_min_ms = gap_ms;
-		}
-		if (gap_ms > hook_link.interval_max_ms) {
-			hook_link.interval_max_ms = gap_ms;
-		}
-		hook_link_interval_sum_ms += gap_ms;
-	}
-
-	hook_link.received++;
-
 #if defined(CONFIG_TIME_MANAGER_SERVICE)
 	{
 		int64_t utc_ms = 0;
@@ -118,6 +105,29 @@ static void hook_link_stats_update(uint32_t gap_ms)
 		}
 	}
 #endif
+
+	/*
+	 * The first heartbeat after boot is not a heartbeat interval: its "gap"
+	 * is the time from start-up to the first contact with the host, so it
+	 * must not count as a link timeout. Counting it produced a "longest gap"
+	 * larger than the maximum interval.
+	 */
+	if (hook_link.received == 0U) {
+		hook_link.received++;
+		hook_link_last_beat_unix_s = now_unix_s;
+		return;
+	}
+
+	if ((hook_link.interval_min_ms == 0U) ||
+	    (gap_ms < hook_link.interval_min_ms)) {
+		hook_link.interval_min_ms = gap_ms;
+	}
+	if (gap_ms > hook_link.interval_max_ms) {
+		hook_link.interval_max_ms = gap_ms;
+	}
+	hook_link_interval_sum_ms += gap_ms;
+
+	hook_link.received++;
 	hook_link_last_beat_unix_s = now_unix_s;
 
 	if (gap_ms <= (uint32_t)CONFIG_HOOK_LINK_TIMEOUT_MS) {
