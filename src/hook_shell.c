@@ -19,6 +19,7 @@
 #include "board.h"
 #include "hook_at.h"
 #include "hook_4g.h"
+#include "hook_4g_cfg.h"
 #include "hook_ota.h"
 #include "hook_params.h"
 #include "hook_register.h"
@@ -61,6 +62,9 @@ static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "ota            : %s (%u/%u B)",
 		    hook_ota_state_name(hook_ota_get_state()),
 		    hook_ota_bytes_received(), hook_ota_image_size());
+	shell_print(sh, "4g provisioning: %s (cid=%s)",
+		    hook_4g_cfg_state_name(hook_4g_cfg_get_state()),
+		    hook_4g_cfg_cid());
 	shell_print(sh, "power schedule : on %02u:%02u off %02u:%02u (Beijing)",
 		    hook_reg_get(POWER_ON_TIME) >> 8,
 		    hook_reg_get(POWER_ON_TIME) & 0xFFU,
@@ -576,6 +580,54 @@ static int cmd_hook_reset(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/*
+ * Run the 4G provisioning flow by hand.
+ *
+ *   hook provision status   - what the module would be configured with
+ *   hook provision run      - compare and write only what differs
+ *   hook provision factory  - AT+CLEAR + full rewrite (new/swapped module)
+ *
+ * Without an argument "run" is used. The module restarts during the flow, so
+ * the command blocks for 10~40 s.
+ */
+static int cmd_hook_provision(const struct shell *sh, size_t argc, char **argv)
+{
+	char summary[192];
+	bool factory = false;
+	int ret;
+
+	if ((argc >= 2U) && (strcmp(argv[1], "status") == 0)) {
+		(void)hook_4g_cfg_format_summary(summary, sizeof(summary));
+		shell_print(sh, "state=%s",
+			    hook_4g_cfg_state_name(hook_4g_cfg_get_state()));
+		shell_print(sh, "%s", summary);
+		return 0;
+	}
+
+	if ((argc >= 2U) && (strcmp(argv[1], "factory") == 0)) {
+		factory = true;
+	} else if ((argc >= 2U) && (strcmp(argv[1], "run") != 0)) {
+		shell_error(sh, "usage: hook provision [status|run|factory]");
+		return -EINVAL;
+	}
+
+	(void)hook_4g_cfg_format_summary(summary, sizeof(summary));
+	shell_print(sh, "%s", summary);
+	shell_print(sh, "provisioning%s, the module restarts, this takes 10-40 s...",
+		    factory ? " (factory: clear + full rewrite)" : "");
+
+	ret = hook_4g_cfg_run(factory);
+
+	if (ret == 0) {
+		shell_print(sh, "provisioning done, MQTT connected");
+	} else {
+		shell_error(sh, "provisioning failed: %d (state=%s)", ret,
+			    hook_4g_cfg_state_name(hook_4g_cfg_get_state()));
+	}
+
+	return ret;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	hook_ota_cmds,
 	SHELL_CMD(start, NULL, "Arm the Ymodem OTA receiver (writes slot1).",
@@ -605,6 +657,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "mqtt_svr, mqtt_user, mqtt_psw, mqtt_cid; add \"hex\" to "
 		      "dump the frames)",
 		      cmd_hook_usr, 2, 8),
+	SHELL_CMD_ARG(provision, NULL,
+		      "4G module provisioning: provision [status|run|factory]",
+		      cmd_hook_provision, 1, 1),
 	SHELL_CMD(ota, &hook_ota_cmds, "OTA image commands.", NULL),
 	SHELL_CMD(reset, NULL, "Cold reboot the controller.", cmd_hook_reset),
 	SHELL_SUBCMD_SET_END);

@@ -22,10 +22,13 @@
  */
 #include "hook_4g.h"
 
+#include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
 #include "hook_at.h"
 #include "hook_cloud_proto.h"
@@ -307,6 +310,12 @@ static uint8_t hook_4g_text_ratio(const uint8_t *buf, uint16_t len)
 #define HOOK_4G_AT_BUF_SIZE            1024U
 #define HOOK_4G_AT_RESPONSE_TIMEOUT_MS 3000U
 #define HOOK_4G_ROUTE_STICKY_MS        1000U
+/* Longest "usr.cn#" + AT command (a full MQTTPUBTP line fits twice over). */
+#define HOOK_4G_AT_CMD_MAX_LEN         192U
+/* How long hook_4g_at_cmd() waits for the AT channel before giving up. */
+#define HOOK_4G_AT_CMD_LOCK_MS         3500U
+/* Extra grace for the 4G thread to close an exchange we timed out on. */
+#define HOOK_4G_AT_CMD_DRAIN_MS        500U
 
 enum hook_4g_route {
 	HOOK_4G_ROUTE_NONE = 0,
@@ -319,8 +328,44 @@ static uint16_t hook_4g_at_len;
 static bool hook_4g_at_active;
 static bool hook_4g_at_overflow;
 static uint32_t hook_4g_at_deadline_ms;
+/* Requested wait of the exchange being collected (0 = none). */
+static uint32_t hook_4g_at_timeout_ms;
 static enum hook_4g_route hook_4g_last_route;
 static uint32_t hook_4g_last_route_ms;
+
+/*
+ * Synchronous exchange context (hook_4g_at_cmd).
+ *
+ * It is deliberately a single static object: only one synchronous exchange
+ * can run at a time (arbitrated by hook_4g_at_mutex) and the 4G thread may
+ * still be finishing the answer when the caller times out. Keeping the
+ * context out of the caller's stack makes that race harmless - the late
+ * answer is simply written into a context nobody looks at any more.
+ */
+struct hook_4g_at_wait {
+	char resp[HOOK_4G_AT_BUF_SIZE];
+	uint16_t len;
+	int result;
+	bool pending;
+};
+
+static struct hook_4g_at_wait hook_4g_at_wait;
+/* Signalled by the 4G thread when a synchronous exchange completes. */
+K_SEM_DEFINE(hook_4g_at_wait_done, 0, 1);
+/* Serialises synchronous exchanges; held for the whole exchange. */
+static K_MUTEX_DEFINE(hook_4g_at_mutex);
+/* Set when the module prints its boot banner, cleared before a module restart. */
+static volatile bool hook_4g_modem_boot_seen_flag;
+
+bool hook_4g_modem_boot_seen(void)
+{
+	return hook_4g_modem_boot_seen_flag;
+}
+
+void hook_4g_modem_boot_reset(void)
+{
+	hook_4g_modem_boot_seen_flag = false;
+}
 
 static void hook_4g_echo_sanitized(const uint8_t *buf, uint16_t len)
 {
@@ -350,6 +395,25 @@ static void hook_4g_echo_sanitized(const uint8_t *buf, uint16_t len)
 	}
 }
 
+/* Substring search over a received block (blocks are not NUL terminated). */
+static bool hook_4g_contains(const uint8_t *buf, uint16_t len,
+			     const char *needle)
+{
+	size_t needle_len = strlen(needle);
+
+	if ((needle_len == 0U) || ((size_t)len < needle_len)) {
+		return false;
+	}
+
+	for (uint16_t i = 0U; (size_t)(len - i) >= needle_len; i++) {
+		if (memcmp(&buf[i], needle, needle_len) == 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /*
  * Parse the "<num>," topic prefix of a distribution-mode frame.
  * Returns the prefix length (0 when this is not a topic frame).
@@ -375,13 +439,67 @@ static uint8_t hook_4g_parse_topic_prefix(const uint8_t *buf, uint16_t len,
 	return (uint8_t)(index + 1U);
 }
 
-/* Start collecting a module AT answer (called when a usr.cn command is sent). */
-void hook_4g_at_exchange_start(void)
+/*
+ * True when the answer holds "OK"/"ERROR" at @p index followed by a line end.
+ *
+ * Both CRLF and a bare LF are accepted: module firmware revisions differ, and
+ * a mismatch here made every synchronous exchange time out even though the
+ * answer had arrived.
+ */
+static bool hook_4g_at_token_at(const uint8_t *buf, uint16_t len,
+				uint16_t index, const char *token)
 {
+	size_t token_len = strlen(token);
+
+	if ((size_t)(len - index) < (token_len + 1U)) {
+		return false;
+	}
+
+	if (memcmp(&buf[index], token, token_len) != 0) {
+		return false;
+	}
+
+	return (buf[index + token_len] == '\n') ||
+	       (buf[index + token_len] == '\r');
+}
+
+/* Classify a complete AT answer by its terminator. */
+static int hook_4g_at_tail_result(const uint8_t *buf, uint16_t len)
+{
+	uint16_t start = (len > 16U) ? (uint16_t)(len - 16U) : 0U;
+
+	for (uint16_t i = start; i < len; i++) {
+		if (hook_4g_at_token_at(buf, len, i, "ERROR")) {
+			return -EIO;
+		}
+
+		if (hook_4g_at_token_at(buf, len, i, "OK")) {
+			return 0;
+		}
+	}
+
+	return -EBADMSG;
+}
+
+/* Start collecting a module AT answer (called when a usr.cn command is sent). */
+int hook_4g_at_exchange_start(void)
+{
+	if (hook_4g_at_wait.pending) {
+		/* A synchronous exchange owns the AT channel. */
+		return -EBUSY;
+	}
+
 	hook_4g_at_len = 0U;
 	hook_4g_at_overflow = false;
+	hook_4g_at_timeout_ms = HOOK_4G_AT_RESPONSE_TIMEOUT_MS;
+	hook_4g_at_deadline_ms = k_uptime_get_32() + hook_4g_at_timeout_ms;
+	/* Publish the deadline before the exchange becomes visible to the 4G
+	 * thread, otherwise its timeout check may close the exchange with the
+	 * previous deadline.
+	 */
 	hook_4g_at_active = true;
-	hook_4g_at_deadline_ms = k_uptime_get_32() + HOOK_4G_AT_RESPONSE_TIMEOUT_MS;
+
+	return 0;
 }
 
 /* Deliver the collected AT answer (console + topic 1) and end the exchange. */
@@ -392,6 +510,34 @@ static void hook_4g_at_exchange_finish(void)
 	}
 
 	hook_4g_at_active = false;
+
+	if (hook_4g_at_wait.pending) {
+		/*
+		 * A synchronous caller is waiting: hand the raw answer over
+		 * without echoing it on the shell or mirroring it to MQTT -
+		 * this exchange may carry the MQTT password.
+		 */
+		uint16_t copy = MIN(hook_4g_at_len,
+				    (uint16_t)(sizeof(hook_4g_at_wait.resp) - 1U));
+
+		memcpy(hook_4g_at_wait.resp, hook_4g_at_buf, copy);
+		hook_4g_at_wait.resp[copy] = '\0';
+		hook_4g_at_wait.len = copy;
+
+		if (copy > 0U) {
+			hook_4g_at_wait.result =
+				hook_4g_at_tail_result(hook_4g_at_buf, copy);
+			if (hook_4g_at_wait.result == -EBADMSG) {
+				LOG_WRN("AT answer carries no OK/ERROR (%u B collected)",
+					copy);
+			}
+		} else {
+			hook_4g_at_wait.result = -ETIMEDOUT;
+		}
+
+		k_sem_give(&hook_4g_at_wait_done);
+		return;
+	}
 
 	if (hook_4g_at_len == 0U) {
 		return;
@@ -409,26 +555,19 @@ static void hook_4g_at_exchange_finish(void)
 /* True when the buffer already contains the module's end-of-answer marker. */
 static bool hook_4g_at_has_terminator(const uint8_t *buf, uint16_t len)
 {
-	static const char ok[] = "OK\r\n";
-	static const char err[] = "ERROR\r\n";
+	uint16_t start;
 
-	if (len < sizeof(ok) - 1U) {
+	if (len < 3U) {
 		return false;
 	}
 
 	/* Only the tail can hold the terminator of the current answer. */
-	uint16_t start = (len > 16U) ? (uint16_t)(len - 16U) : 0U;
+	start = (len > 16U) ? (uint16_t)(len - 16U) : 0U;
 
 	for (uint16_t i = start; i < len; i++) {
-		if ((uint16_t)(len - i) >= sizeof(ok) - 1U) {
-			if (memcmp(&buf[i], ok, sizeof(ok) - 1U) == 0) {
-				return true;
-			}
-		}
-		if ((uint16_t)(len - i) >= sizeof(err) - 1U) {
-			if (memcmp(&buf[i], err, sizeof(err) - 1U) == 0) {
-				return true;
-			}
+		if (hook_4g_at_token_at(buf, len, i, "OK") ||
+		    hook_4g_at_token_at(buf, len, i, "ERROR")) {
+			return true;
 		}
 	}
 
@@ -438,15 +577,22 @@ static bool hook_4g_at_has_terminator(const uint8_t *buf, uint16_t len)
 /* Append one received chunk to the pending AT answer. */
 static bool hook_4g_at_exchange_feed(const uint8_t *buf, uint16_t len)
 {
-	uint16_t space = (uint16_t)(sizeof(hook_4g_at_buf) - hook_4g_at_len);
-	uint16_t copy = (len < space) ? len : space;
+	/*
+	 * A module restart puts 0x00 bytes on the UART (framing errors). They
+	 * are not part of an AT answer, which is always text: skipping them
+	 * keeps a noise byte that slipped into the same block from breaking the
+	 * OK/ERROR terminator detection.
+	 */
+	for (uint16_t i = 0U; i < len; i++) {
+		if (buf[i] == 0x00U) {
+			continue;
+		}
 
-	if (copy > 0U) {
-		memcpy(&hook_4g_at_buf[hook_4g_at_len], buf, copy);
-		hook_4g_at_len = (uint16_t)(hook_4g_at_len + copy);
-	}
-	if (copy < len) {
-		hook_4g_at_overflow = true;
+		if (hook_4g_at_len < (uint16_t)sizeof(hook_4g_at_buf)) {
+			hook_4g_at_buf[hook_4g_at_len++] = buf[i];
+		} else {
+			hook_4g_at_overflow = true;
+		}
 	}
 
 	if (hook_4g_at_has_terminator(hook_4g_at_buf, hook_4g_at_len)) {
@@ -468,9 +614,113 @@ static void hook_4g_at_exchange_timeout_check(void)
 		return;
 	}
 
-	LOG_WRN("AT answer incomplete after %u ms, delivering %u B",
-		(unsigned int)HOOK_4G_AT_RESPONSE_TIMEOUT_MS, hook_4g_at_len);
+	if (hook_4g_at_wait.pending) {
+		/* The synchronous caller reports its own timeout. */
+		LOG_DBG("AT exchange timed out after %u ms (%u B collected)",
+			(unsigned int)hook_4g_at_timeout_ms, hook_4g_at_len);
+	} else {
+		LOG_WRN("AT answer incomplete after %u ms, delivering %u B",
+			(unsigned int)hook_4g_at_timeout_ms, hook_4g_at_len);
+	}
 	hook_4g_at_exchange_finish();
+}
+
+int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
+		   uint32_t timeout_ms)
+{
+	char line[HOOK_4G_AT_CMD_MAX_LEN];
+	int written;
+	int ret;
+
+	if ((cmd == NULL) || (cmd[0] == '\0') || (timeout_ms == 0U)) {
+		return -EINVAL;
+	}
+
+	if (k_mutex_lock(&hook_4g_at_mutex,
+			 K_MSEC(HOOK_4G_AT_CMD_LOCK_MS)) != 0) {
+		return -EBUSY;
+	}
+
+	/* Let a hand typed exchange (shell "hook usr") finish first. */
+	for (uint32_t waited = 0U; hook_4g_at_active; waited += 50U) {
+		if (waited >= HOOK_4G_AT_RESPONSE_TIMEOUT_MS) {
+			k_mutex_unlock(&hook_4g_at_mutex);
+			return -EBUSY;
+		}
+		k_msleep(50);
+	}
+
+	written = snprintf(line, sizeof(line), "usr.cn#%s\r\n", cmd);
+	if ((written <= 0) || ((size_t)written >= sizeof(line))) {
+		k_mutex_unlock(&hook_4g_at_mutex);
+		return -EINVAL;
+	}
+
+	k_sem_reset(&hook_4g_at_wait_done);
+	hook_4g_at_wait.len = 0U;
+	hook_4g_at_wait.result = -ETIMEDOUT;
+	hook_4g_at_wait.resp[0] = '\0';
+	hook_4g_at_wait.pending = true;
+
+	hook_4g_at_len = 0U;
+	hook_4g_at_overflow = false;
+	hook_4g_at_timeout_ms = timeout_ms;
+	hook_4g_at_deadline_ms = k_uptime_get_32() + timeout_ms;
+	hook_4g_at_active = true;
+
+	{
+		int sent = (int)hook_4g_send((const uint8_t *)line,
+					     (uint16_t)strlen(line));
+
+		/* uart_manage returns UART_MANAGE_OK (0) on success. */
+		if (sent < 0) {
+			hook_4g_at_active = false;
+			hook_4g_at_wait.pending = false;
+			k_mutex_unlock(&hook_4g_at_mutex);
+			LOG_ERR("AT command '%s' could not be sent (%d)", cmd,
+				sent);
+			return -EIO;
+		}
+	}
+
+	if (k_sem_take(&hook_4g_at_wait_done, K_MSEC(timeout_ms)) != 0) {
+		/*
+		 * The 4G thread closes the exchange on its own deadline; give it
+		 * a moment so a late answer is not echoed to the shell / MQTT
+		 * afterwards. Only when it stays silent (thread stalled) is the
+		 * exchange dropped here.
+		 */
+		if (k_sem_take(&hook_4g_at_wait_done,
+			       K_MSEC(HOOK_4G_AT_CMD_DRAIN_MS)) != 0) {
+			hook_4g_at_active = false;
+			hook_4g_at_wait.pending = false;
+			k_mutex_unlock(&hook_4g_at_mutex);
+			return -ETIMEDOUT;
+		}
+
+		hook_4g_at_wait.pending = false;
+		k_mutex_unlock(&hook_4g_at_mutex);
+		return -ETIMEDOUT;
+	}
+
+	hook_4g_at_wait.pending = false;
+	ret = hook_4g_at_wait.result;
+
+	if ((resp != NULL) && (resp_len > 0U)) {
+		size_t copy = MIN((size_t)hook_4g_at_wait.len, resp_len - 1U);
+
+		memcpy(resp, hook_4g_at_wait.resp, copy);
+		resp[copy] = '\0';
+	}
+
+	k_mutex_unlock(&hook_4g_at_mutex);
+
+	return ret;
+}
+
+bool hook_4g_at_cmd_is_active(void)
+{
+	return hook_4g_at_wait.pending;
 }
 
 /* Route one distribution-mode frame according to its topic number. */
@@ -528,8 +778,31 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	uint8_t topic = 0U;
 	uint8_t prefix_len;
 
+	/*
+	 * Drop the line noise a module restart puts on the link: one or two
+	 * 0x00 bytes (with a framing error at the UART). No valid frame looks
+	 * like this - an MQTT payload carries a "<num>," prefix and an AT
+	 * answer carries text - so filtering it cannot hide real data, while
+	 * letting it through would pollute the AT answer being collected.
+	 */
+	if ((len <= 2U) && ((len == 0U) || ((buf[0] == 0x00U) &&
+					    ((len == 1U) || (buf[1] == 0x00U))))) {
+		return;
+	}
+
 	if (hook_4g_hex_echo_enabled) {
 		hook_4g_hex_dump(buf, len);
+	}
+
+	/*
+	 * Module boot banner: proof that the module finished booting. The
+	 * provisioning flow waits for it before its first AT command, because
+	 * talking to the module while it is still starting up is unreliable.
+	 */
+	if (!hook_4g_modem_boot_seen_flag &&
+	    hook_4g_contains(buf, len, "WH-LTE-7S1")) {
+		hook_4g_modem_boot_seen_flag = true;
+		LOG_INF("4G module boot banner seen (module is up)");
 	}
 
 	/* 1) MQTT distribution frame: "<num>,<payload>" */

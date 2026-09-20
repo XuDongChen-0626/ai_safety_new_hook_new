@@ -47,6 +47,24 @@ struct hook_link_stats {
 void hook_heartbeat_get_link_stats(struct hook_link_stats *out);
 void hook_heartbeat_clear_link_stats(void);
 
+/*
+ * Suspend/resume the heartbeat timeout actions.
+ *
+ * While the 4G module is being provisioned it saves its configuration and
+ * restarts, so no heartbeat can arrive for 10~40 s. The counter keeps being
+ * followed, only the consequences (LED/buzzer cut, alarm supply off, offline
+ * detection) are parked - resuming re-arms the timers so the first heartbeat
+ * after the provisioning does not trip anything.
+ */
+#if defined(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE)
+void hook_heartbeat_set_suspend(bool suspended);
+#else
+static inline void hook_heartbeat_set_suspend(bool suspended)
+{
+	(void)suspended;
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

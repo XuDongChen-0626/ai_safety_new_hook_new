@@ -161,6 +161,9 @@ hook usr mqtt_user    # 快捷查询：MQTT 用户名     (AT+MQTTUSER)
 hook usr mqtt_psw     # 快捷查询：MQTT 密码       (AT+MQTTPSW)
 hook usr mqtt_cid     # 快捷查询：MQTT Client ID  (AT+MQTTCID)
 hook usr hex on|off    # 逐帧 hex dump 开关（排查用）
+hook provision status  # 查看按 device.no 组装的 MQTT 话题/CID 与配置状态
+hook provision run     # 立即执行"比对 + 差异写入"（模块会重启，10~40 s）
+hook provision factory # 出厂流程：AT+CLEAR + 全量重写 + AT+S
 hook craner AT+OTAINFO # 本机 craner#AT 命令（等价 craner#AT+OTAINFO）
 hook ota start        # 手动进入接收态（等上位机发 Ymodem）
 hook ota cancel       # 中止
@@ -322,8 +325,8 @@ tool/       开发工作流脚本
       超时次数、平均/最大间隔、最近一次超时时间戳；间隔超过 20 s 记一次超时，
       且**只在心跳恢复时写一条** `4g` 分类离线日志（断链期间不刷日志，软待机不统计）；
       云端 0x0A 写 1 字节 `0x5A` 才清零统计。
-    详细说明与现场验证步骤见 [docs/离线日志与设备参数.md](docs/离线日志与设备参数.md)。
-    资源影响：Flash +61.2 KB、RAM +22.4 KB（app 231,812 B / 147,480 B）。
+   详细说明与现场验证步骤见 [docs/离线日志与设备参数.md](docs/离线日志与设备参数.md)。
+    资源影响见下方第 13 条（含 4G 自动配置）后的最新数字。
 12. **主机心跳超时与声光报警器的联动**（2026-09-18 调整）：主机心跳静默
     `HEARTBEAT_TIMEOUT_MS`（60 s）后，控制器切断报警器供电（PE5）并关闭 PWD_LED，
     并在同一步完成：
@@ -334,6 +337,57 @@ tool/       开发工作流脚本
       （现场日志中的 `alarm module keepalive write failed` 不再出现）；
     * 软待机退出时若仍处于该状态，`hook_health_sleep_update(false)` 不会重新打开声光检测。
 
-    重新收到主机心跳后按相反顺序恢复：供电 → 恢复通讯（音量/LED 缓存已作废，第一轮重新下发
+   重新收到主机心跳后按相反顺序恢复：供电 → 恢复通讯（音量/LED 缓存已作废，第一轮重新下发
     真实值）→ 重新打开离线检测（15 s 窗口从此刻起算）→ 清除 `ERR_LED_OFFLINE`。
     上位机把 `HEARTBEAT_ENABLE` 写 0（关闭心跳监督）时，同样立即解除该状态。
+13. **4G 模块自动配置 / MQTT 话题组建**（2026-09-19 新增）：出厂不再需要工程师逐条敲
+    `usr.cn#AT...`，`app/hook_4g_cfg/` 在每次 MCU 开机时执行一次：
+
+    * 话题与 CID 由持久化参数 `device.no` 推导（`dev = "ais" + device.no`）：
+
+      ```text
+      CID    = <dev>-hook                              ais998-hook
+      PUB 1  = ai_safety/<dev>/system/hook/server        2,0
+      PUB 2  = ai_safety/<dev>/ota/hook/server           2,0
+      PUB 3  = ai_safety/<dev>/inform/hook/device_manager 2,0
+      SUB 1  = ai_safety/<dev>/system/server/hook        2
+      SUB 2  = ai_safety/<dev>/ota/server/hook           2
+      SUB 3  = ai_safety/<dev>/command/device_manager/hook 2
+      SUB 4  = ai_safety/<dev>/heartbeat/device_manager/hook 0
+      ```
+
+    * 判据三分支：模块不应答 → 最多等 60 s（冷启动 + 注网，实测首次应答约 40 s），
+      仍不应答只写日志、下次开机再试（**不**清配置）；`AT+WKMOD` 读回不含 `MQTT` →
+      出厂流程 `AT+CLEAR` + 全量重写；已是 MQTT 模式 → 逐项读回比对，只写差异项。
+      命令级失败（写命令/校验）重试 3 次；
+    * 有写入就 `AT+S` 保存并让**模块**重启（MCU 不重启），随后等模块回来并用
+      `AT+MQTTSTA` 校验 `CONNECTION`；配置期间暂停主机心跳超时动作（模块重启收不到心跳）；
+    * `mqtt.svr` / `mqtt.port` / `mqtt.user` / `mqtt.psw` 与 `device.no` 都在参数表里，
+      默认 `mqtt.craner.hk:1883` / `hkcrctest` / `crcHK3130`；`device.no` 的默认值是
+      硬件 `short_id`，所以新板子不上工厂编号也能连上；
+    * 参数集指纹存 `modem.cfg_hash`：改了 `device.no` 或任一 `mqtt.*` 就在下次开机重配一次
+      （覆盖模块读不回来的密码）；运行中改参数不会立刻重配，与手动流程一致；
+    * 写入 `AT+S` 后再**读回比对一次**（模块可能在写入过程中自行重启、丢掉期间的命令），
+      仍有差异则重试整个流程；读回一致但 `AT+MQTTSTA` 未连接只再试一轮就按网络问题记录，
+      不无限重试；
+    * 全部走同步 AT 通道（`hook_4g_at_cmd()`），交换过程不打印到终端、不镜像到话题 1
+      （里面含 MQTT 密码）；离线日志 `4g` 分类记录每次决策与结果；模块重启时链路
+      上出现的"1~2 字节全 0"噪声帧会被丢弃，避免污染 AT 应答；
+    * 配置流程只在开机跑一次（`AppCfgTask`，栈 4 KiB），保存指纹前会检查是否有
+      **未 `param save` 的改动**：有就跳过指纹保存，绝不替工程师把参数写进 flash；
+    * 现场命令：`hook provision status|run|factory`；云端可通过话题 1 用
+      `craner#AT+PARAM` 读取/修改参数（见下一条）。
+14. **云端参数访问**（2026-09-19 新增）：话题 1（远程调试口）新增 `craner#AT+PARAM` 命令，
+    云端无需改动 0xA5 二进制协议即可查询与修改参数：
+
+    ```text
+    craner#AT+PARAM                     -> craner#+PARAM:<n>;device.no=998;...
+    craner#AT+PARAM=device.no           -> craner#+PARAM:device.no=998
+    craner#AT+PARAM=device.no,998       -> craner#OK            (只写内存, dirty)
+    craner#AT+PARAM=device.no,998,save  -> craner#OK            (写入并落盘)
+    craner#AT+PARAM=save                -> craner#OK            (保存所有 dirty)
+    craner#AT+PARAM=reset,device.no     -> craner#OK            (恢复默认值)
+    ```
+
+    读回的 `mqtt.psw` 一律显示 `***`；key 不存在/参数非法返回 `craner#+PARAMERR:<原因>`。
+    资源影响（含 13/14 条）：Flash +8.4 KB、RAM +12.1 KB（app 240,884 B / 159,896 B）。

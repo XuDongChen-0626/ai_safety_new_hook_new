@@ -48,6 +48,8 @@ LOG_MODULE_REGISTER(hook_heartbeat, CONFIG_LOG_DEFAULT_LEVEL);
 static uint16_t hook_heartbeat_last_counter;
 static uint32_t hook_heartbeat_last_counter_ms;
 static bool hook_heartbeat_alarm_power_on;
+/* Parked by the automatic 4G provisioning (module restarts mid-flow). */
+static volatile bool hook_heartbeat_suspended;
 
 /* Host heartbeat reception quality (see hook_heartbeat.h). */
 static struct hook_link_stats hook_link;
@@ -144,6 +146,28 @@ bool hook_heartbeat_alarm_power_is_on(void)
 	return hook_heartbeat_alarm_power_on;
 }
 
+void hook_heartbeat_set_suspend(bool suspended)
+{
+	hook_heartbeat_suspended = suspended;
+
+	/* Feed the timers across the suspension so the resume does not look
+	 * like a 60 s silence.
+	 */
+	hook_heartbeat_last_counter_ms = hook_get_time_ms();
+	hook_heartbeat_last_counter = hook_reg_get(CMD_HOST_HEARTBEAT);
+
+	if (!suspended) {
+		/*
+		 * Keep the health service in step with the supervision: its
+		 * "host_heartbeat offline" decision is based on the age of the
+		 * last hook_health_report(), and without this it would fire up to
+		 * a minute away from the 60 s supply cut (observed: offline at
+		 * 65 s, alarm supply cut 37 s later).
+		 */
+		hook_health_report(HOOK_HEALTH_EVENT_HOST_HEARTBEAT);
+	}
+}
+
 static void hook_heartbeat_set_alarm_power(bool on)
 {
 	GPIO_WRITE(alarm_power_en_gpio, on);
@@ -196,6 +220,15 @@ static void hook_heartbeat_logic(void)
 		hook_heartbeat_last_counter_ms = now;
 		hook_heartbeat_last_counter = hook_reg_get(CMD_HOST_HEARTBEAT);
 		hook_heartbeat_alarm_power_on = false;
+		return;
+	}
+
+	if (hook_heartbeat_suspended) {
+		/* 4G provisioning: the module cannot deliver heartbeats while it
+		 * saves and restarts. Keep the timers fed, take no action.
+		 */
+		hook_heartbeat_last_counter_ms = now;
+		hook_heartbeat_last_counter = hook_reg_get(CMD_HOST_HEARTBEAT);
 		return;
 	}
 

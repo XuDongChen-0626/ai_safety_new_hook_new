@@ -1231,6 +1231,22 @@ void StartTaskModbusMaster(void *argument1, void *argument2, void *argument3)
 	 else
 	 	k_msleep(3);
 
+	 /*
+	  * Flush the receive path before the request goes out.
+	  *
+	  * While the bus is idle, the module (or the wiring) can put a stray
+	  * byte into the ring. That byte arms the T3.5 timer, whose "frame
+	  * arrived" notification stays pending in the task notify object, so the
+	  * wait below returns immediately after SendQuery(): getRxBuffer() then
+	  * hands a 1-byte "answer" to the parser and the query fails with
+	  * "P:BAD_SIZE,size=1" even though the module executed the command and
+	  * answered a moment later (its real answer is dropped together with
+	  * the noise).
+	  */
+	 k_timer_stop(&modH->xTimerT35);
+	 RingClear(&modH->xBufferRX);
+	 k_sem_reset(&modH->task_notify.sem);
+
      // This is the case for implementations with only USART support
      SendQuery(modH, telegram);
      /* Block indefinitely until a Modbus Frame arrives or query timeouts*/

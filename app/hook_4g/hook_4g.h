@@ -13,6 +13,7 @@
 #define HOOK_4G_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -45,8 +46,42 @@ void hook_4g_enable_hex_echo(bool enable);
  * is sent to the module: the answer is reassembled (the UART idle timer may
  * split it over several chunks) until its "OK"/"ERROR" terminator and then
  * printed on the shell and published on topic 1.
+ *
+ * Returns -EBUSY when a synchronous exchange (hook_4g_at_cmd) owns the AT
+ * channel, so a hand typed command cannot interleave with it.
  */
-void hook_4g_at_exchange_start(void);
+int hook_4g_at_exchange_start(void);
+
+/*
+ * Synchronous AT exchange: send "usr.cn#<cmd>" and wait for the module answer.
+ *
+ * Unlike the shell passthrough this does NOT print the exchange on the shell
+ * and does NOT mirror it to MQTT topic 1, which matters for the automatic
+ * provisioning flow (it sends the MQTT password).
+ *
+ * @param cmd        command without the "usr.cn#" prefix, e.g. "AT+MQTTSTA"
+ * @param resp       optional buffer for the whole answer (NUL terminated)
+ * @param resp_len   size of resp
+ * @param timeout_ms how long to wait for the OK/ERROR terminator
+ *
+ * @return 0 on "OK", -EIO on "ERROR", -ETIMEDOUT, -EBUSY when the AT channel
+ *         is busy, -EINVAL on bad arguments.
+ */
+int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
+		   uint32_t timeout_ms);
+
+/* True while hook_4g_at_cmd() owns the AT channel. */
+bool hook_4g_at_cmd_is_active(void);
+
+/*
+ * Module boot banner ("WH-LTE-7S1") observed on the link.
+ *
+ * The module must not be talked to while it is still booting: the automatic
+ * provisioning waits for this flag before its first probe. Builds that hide
+ * the banner are covered by a bounded fallback wait.
+ */
+bool hook_4g_modem_boot_seen(void);
+void hook_4g_modem_boot_reset(void);
 
 #ifdef __cplusplus
 }

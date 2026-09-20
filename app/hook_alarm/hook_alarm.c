@@ -27,6 +27,13 @@ LOG_MODULE_REGISTER(hook_alarm, CONFIG_LOG_DEFAULT_LEVEL);
 /* Single voice playback lasts about 5.3 s on the module. */
 #define HOOK_ALARM_VOICE_PLAY_MS 5300U
 
+/* Supply-on settling time before the power-on self test talks to the module.
+ * The module needs a moment after PE5 switches its supply on; the earlier
+ * "P:BAD_SIZE" failures were a Modbus receive path bug (fixed), so this only
+ * covers the module's own start-up time.
+ */
+#define HOOK_ALARM_POST_SETTLE_MS 3000U
+
 /* Volume polling period of the outer loop. */
 #define HOOK_ALARM_LOGIC_PERIOD_MS 500U
 
@@ -371,7 +378,14 @@ static void hook_alarm_power_on_self_test(void)
 	uint32_t ret;
 
 	LOG_INF("[POST] alarm module self test");
-	k_msleep(2500);
+	/*
+	 * The sound & light module needs a few seconds after its supply is
+	 * switched on (PE5) before it answers Modbus: with 2.5 s the test
+	 * command was accepted by the module but its answer came back as a
+	 * 1-byte noise frame ("P:BAD_SIZE,size=1"), so the controller reported
+	 * a failure while the module had actually played the test tone.
+	 */
+	k_msleep(HOOK_ALARM_POST_SETTLE_MS);
 
 	ret = hook_alarm_write(0x2303U, 0x0001U);
 	GPIO_WRITE(pwr_led_gpio, 1);

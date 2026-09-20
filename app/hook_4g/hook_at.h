@@ -14,6 +14,11 @@
  *   craner#AT+OTA_CONFIRM      -> craner#OK       (confirm running image)
  *   craner#AT+OTACANCEL        -> craner#OK
  *   craner#AT+SYSRESET         -> cold reboot
+ *   craner#AT+PARAM            -> craner#+PARAM:<n>;key=value;...
+ *   craner#AT+PARAM=<key>      -> craner#+PARAM:<key>=<value>
+ *   craner#AT+PARAM=<key>,<value>[,save]
+ *   craner#AT+PARAM=save       -> persist dirty parameters
+ *   craner#AT+PARAM=reset,<key>
  *
  * "usr.cn#AT..." lines are forwarded unchanged to the usr.cn module.
  */

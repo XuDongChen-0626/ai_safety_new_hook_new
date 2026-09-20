@@ -8,6 +8,7 @@
 
 #include "board.h"
 #include "hook_4g.h"
+#include "hook_4g_cfg.h"
 #include "hook_alarm.h"
 #include "hook_bms.h"
 #include "hook_health.h"
@@ -52,6 +53,7 @@ void init_app_hook_task(void)
 #if defined(CONFIG_HOOK_4G_ENABLE)
 	hook_4g_init();
 	hook_4g_start();
+	hook_4g_cfg_start();
 #endif
 #if defined(CONFIG_HOOK_OTA_ENABLE)
 	hook_ota_init();

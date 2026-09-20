@@ -18,6 +18,11 @@
 LOG_MODULE_REGISTER(hook_params, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define HOOK_PARAM_DEVICE_NO "device.no"
+#define HOOK_PARAM_MQTT_SVR  "mqtt.svr"
+#define HOOK_PARAM_MQTT_PORT "mqtt.port"
+#define HOOK_PARAM_MQTT_USER "mqtt.user"
+#define HOOK_PARAM_MQTT_PSW  "mqtt.psw"
+#define HOOK_PARAM_MODEM_HASH "modem.cfg_hash"
 
 #define HOOK_PARAM_VALUE_MAX 24U
 
@@ -25,27 +30,98 @@ static int hook_param_changed(const char *key, const char *value, void *user_dat
 {
 	ARG_UNUSED(user_data);
 
-	LOG_INF("parameter %s set to \"%s\"", key, (value != NULL) ? value : "");
+	LOG_INF("parameter %s set to \"%s\"", key,
+		hook_params_key_is_secret(key) ? "***" :
+		((value != NULL) ? value : ""));
 	hook_params_refresh();
 
 	return 0;
 }
 
-static const struct device_param_desc hook_param_table[] = {
+/*
+ * Not const: the device.no default is the hardware derived short id, which is
+ * only known at run time (filled in by hook_params_init()).
+ */
+static struct device_param_desc hook_param_table[] = {
 	{
-		/* Factory device number, e.g. "ais011". Empty = use the hardware
-		 * derived short id for logs and MQTT topics.
+		/*
+		 * Factory device number, e.g. "998"; the MQTT topics use
+		 * "ais" + this value. Until the factory writes a real number
+		 * the hardware derived short id is used, so a device is never
+		 * anonymous and the 4G module can always be provisioned.
 		 */
 		.key = HOOK_PARAM_DEVICE_NO,
 		.type = DEVICE_PARAM_TYPE_STRING,
-		.default_value = "",
+		.default_value = "",   /* replaced in hook_params_init() */
 		.flags = DEVICE_PARAM_F_PERSISTENT,
 		.on_change = hook_param_changed,
+	},
+	{
+		/* MQTT broker used by the automatic 4G provisioning. */
+		.key = HOOK_PARAM_MQTT_SVR,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "mqtt.craner.hk",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
+		.on_change = hook_param_changed,
+	},
+	{
+		.key = HOOK_PARAM_MQTT_PORT,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "1883",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
+		.on_change = hook_param_changed,
+	},
+	{
+		.key = HOOK_PARAM_MQTT_USER,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "hkcrctest",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
+		.on_change = hook_param_changed,
+	},
+	{
+		.key = HOOK_PARAM_MQTT_PSW,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "crcHK3130",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
+		.on_change = hook_param_changed,
+	},
+	{
+		/*
+		 * Fingerprint of the MQTT parameter set the 4G module was last
+		 * provisioned with (maintained by app/hook_4g_cfg). It changes
+		 * whenever device.no or a mqtt.* parameter changes, which
+		 * triggers one re-provisioning on the next boot - this is what
+		 * covers parameters the module cannot read back (the password).
+		 */
+		.key = HOOK_PARAM_MODEM_HASH,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
 	},
 };
 
 static char hook_param_device_no[HOOK_PARAM_VALUE_MAX];
 static char hook_param_device_tag[HOOK_PARAM_VALUE_MAX];
+static char hook_param_mqtt_svr[HOOK_PARAM_VALUE_MAX];
+static char hook_param_mqtt_port[HOOK_PARAM_VALUE_MAX];
+static char hook_param_mqtt_user[HOOK_PARAM_VALUE_MAX];
+static char hook_param_mqtt_psw[HOOK_PARAM_VALUE_MAX];
+/* Backing storage for the run time default of device.no. */
+static char hook_param_device_no_default[HOOK_PARAM_VALUE_MAX];
+
+/*
+ * Keys that module/device_identity_service registers through the same
+ * parameter server (IDENTITY_*_KEY in that submodule).
+ *
+ * A parameter that still holds its default value has no entry in the Settings
+ * param/ subtree at all, so a subtree walk cannot see it: these keys are read
+ * explicitly for the offline log dump and for the remote AT+PARAM listing.
+ */
+static const char *const hook_param_external_keys[] = {
+	"id.company",
+	"id.model",
+	"id.product",
+};
 
 const char *hook_params_device_no(void)
 {
@@ -57,14 +133,74 @@ const char *hook_params_device_tag(void)
 	return hook_param_device_tag;
 }
 
+const char *hook_params_mqtt_server(void)
+{
+	return hook_param_mqtt_svr;
+}
+
+const char *hook_params_mqtt_port(void)
+{
+	return hook_param_mqtt_port;
+}
+
+const char *hook_params_mqtt_user(void)
+{
+	return hook_param_mqtt_user;
+}
+
+const char *hook_params_mqtt_password(void)
+{
+	return hook_param_mqtt_psw;
+}
+
+/*
+ * The tail after the last dot decides: mqtt.psw is secret, so are any future
+ * <group>.password / <group>.secret parameters.
+ */
+bool hook_params_key_is_secret(const char *key)
+{
+	static const char *const secret_tails[] = {
+		"psw", "pwd", "pass", "password", "secret",
+	};
+	const char *tail;
+
+	if (key == NULL) {
+		return false;
+	}
+
+	tail = strrchr(key, '.');
+	tail = (tail != NULL) ? &tail[1] : key;
+
+	for (size_t i = 0U; i < ARRAY_SIZE(secret_tails); i++) {
+		if (strcmp(tail, secret_tails[i]) == 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void hook_param_read(const char *key, char *buf, size_t len)
+{
+	if ((device_param_server_get(key, buf, len) != 0) || (buf[0] == '\0')) {
+		buf[0] = '\0';
+	}
+}
+
 void hook_params_refresh(void)
 {
 	const char *short_id;
 
-	if (device_param_server_get(HOOK_PARAM_DEVICE_NO, hook_param_device_no,
-				    sizeof(hook_param_device_no)) != 0) {
-		hook_param_device_no[0] = '\0';
-	}
+	hook_param_read(HOOK_PARAM_DEVICE_NO, hook_param_device_no,
+			sizeof(hook_param_device_no));
+	hook_param_read(HOOK_PARAM_MQTT_SVR, hook_param_mqtt_svr,
+			sizeof(hook_param_mqtt_svr));
+	hook_param_read(HOOK_PARAM_MQTT_PORT, hook_param_mqtt_port,
+			sizeof(hook_param_mqtt_port));
+	hook_param_read(HOOK_PARAM_MQTT_USER, hook_param_mqtt_user,
+			sizeof(hook_param_mqtt_user));
+	hook_param_read(HOOK_PARAM_MQTT_PSW, hook_param_mqtt_psw,
+			sizeof(hook_param_mqtt_psw));
 
 	if (hook_param_device_no[0] != '\0') {
 		(void)snprintk(hook_param_device_tag,
@@ -73,17 +209,83 @@ void hook_params_refresh(void)
 		return;
 	}
 
-	/* No factory number yet: fall back to the hardware derived short id so
-	 * that logs and topics are still device specific.
+	/* Defensive: the parameter server should always hold the short id as
+	 * the default of device.no, but a failed read must not leave the device
+	 * without a tag.
 	 */
 	short_id = device_identity_get_short_id();
 	(void)snprintk(hook_param_device_tag, sizeof(hook_param_device_tag), "%s",
 		       (short_id != NULL) ? short_id : "unknown");
 }
 
+int hook_params_set(const char *key, const char *value)
+{
+	int ret = device_param_server_set(key, value);
+
+	if (ret == 0) {
+		hook_params_refresh();
+	}
+
+	return ret;
+}
+
+int hook_params_save(void)
+{
+	return device_param_server_save();
+}
+
+int hook_params_get(const char *key, char *buf, size_t len)
+{
+	return device_param_server_get(key, buf, len);
+}
+
+int hook_params_reset(const char *key)
+{
+	int ret = device_param_server_reset(key);
+
+	if (ret == 0) {
+		hook_params_refresh();
+	}
+
+	return ret;
+}
+
+size_t hook_params_count(void)
+{
+	return ARRAY_SIZE(hook_param_table) + ARRAY_SIZE(hook_param_external_keys);
+}
+
+const char *hook_params_key_at(size_t index)
+{
+	if (index < ARRAY_SIZE(hook_param_table)) {
+		return hook_param_table[index].key;
+	}
+
+	index -= ARRAY_SIZE(hook_param_table);
+
+	if (index < ARRAY_SIZE(hook_param_external_keys)) {
+		return hook_param_external_keys[index];
+	}
+
+	return NULL;
+}
+
 int hook_params_init(void)
 {
+	const char *short_id;
 	int ret;
+
+	/*
+	 * device.no defaults to the hardware short id: the factory number is
+	 * optional, and a device that never had one must still be able to build
+	 * its MQTT topics (ai_safety/ais<short_id>/...).
+	 */
+	short_id = device_identity_get_short_id();
+	(void)snprintk(hook_param_device_no_default,
+		       sizeof(hook_param_device_no_default), "%s",
+		       ((short_id != NULL) && (short_id[0] != '\0')) ? short_id :
+								      "unknown");
+	hook_param_table[0].default_value = hook_param_device_no_default;
 
 	ret = device_param_server_register_table(hook_param_table,
 						 ARRAY_SIZE(hook_param_table));
@@ -125,21 +327,6 @@ SYS_INIT(hook_params_sys_init, POST_KERNEL, 90);
 static uint32_t hook_param_last_save_count;
 static struct k_work_delayable hook_param_save_work;
 
-/*
- * Keys that module/device_identity_service registers through the same
- * parameter server (IDENTITY_*_KEY in that submodule).
- *
- * A parameter that still holds its default value has no entry in the Settings
- * param/ subtree at all, so the subtree walk below cannot see it. These keys
- * are therefore read explicitly, which is also why the boot dump shows the
- * identity labels before the first "param save".
- */
-static const char *const hook_param_external_keys[] = {
-	"id.company",
-	"id.model",
-	"id.product",
-};
-
 static bool hook_param_is_known_key(const char *key)
 {
 	for (size_t i = 0U; i < ARRAY_SIZE(hook_param_table); i++) {
@@ -162,7 +349,8 @@ static void hook_param_log_value(const char *key, const char *value,
 {
 	(void)offline_log_event(OFFLINE_LOG_CAT_PARAM, OFFLINE_LOG_LEVEL_INF,
 				"param %s=\"%s\" (%s)", key,
-				(value != NULL) ? value : "", reason);
+				hook_params_key_is_secret(key) ? "***" :
+				((value != NULL) ? value : ""), reason);
 }
 
 static int hook_param_log_stored_entry(const char *key, size_t len,
