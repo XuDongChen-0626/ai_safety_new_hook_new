@@ -173,6 +173,7 @@ hook rtc              # RTC 状态：I0x10~0x12 当前时间、H0x20~0x22 校准
 hook rtc set 2026-09-16 14:30   # 写校准寄存器（等价上位机 Modbus 写 / 云端 0x09）
 hook reg i7           # 读输入寄存器 7（当前时间年），hook reg 113 读保持寄存器
 hook link             # 4G 心跳质量统计（次数/平均/最大间隔/最近超时时间），clear 清零
+                      # 云端等价命令：craner#AT+LINK / craner#AT+LINK=clear
 id show               # 设备身份（UID、short id、MQTT client id）
 param list            # 设备参数（含工厂编号 device.no）；param set/save 写入 QSPI
 olog status|list|sync # SD 卡离线日志；mcumgr fs download 可远程拉取
@@ -321,10 +322,10 @@ tool/       开发工作流脚本
       `component/offline_log_service` 写入 `/SD:/olog/`，记录启动/复位原因、软硬待机、
       RTC 校准、BMS/声光离线恢复、4G 心跳超时、OTA 全过程；`olog status/list/sync` 现场查看，
       也可用 `mcumgr fs download` 通过 shell 串口拉取（只允许读 `/SD:/olog`）；
-    * 4G 质量：主机心跳每秒一次，`hook link` / 云端 0x0A 读取
+    * 4G 质量：主机心跳每秒一次，`hook link`（现场）/ `craner#AT+LINK`（云端）读取
       超时次数、平均/最大间隔、最近一次超时时间戳；间隔超过 20 s 记一次超时，
       且**只在心跳恢复时写一条** `4g` 分类离线日志（断链期间不刷日志，软待机不统计）；
-      云端 0x0A 写 1 字节 `0x5A` 才清零统计。
+      清零用 `hook link clear` / `craner#AT+LINK=clear`。
    详细说明与现场验证步骤见 [docs/离线日志与设备参数.md](docs/离线日志与设备参数.md)。
     资源影响见下方第 13 条（含 4G 自动配置）后的最新数字。
 12. **主机心跳超时与声光报警器的联动**（2026-09-18 调整）：主机心跳静默
@@ -391,3 +392,54 @@ tool/       开发工作流脚本
 
     读回的 `mqtt.psw` 一律显示 `***`；key 不存在/参数非法返回 `craner#+PARAMERR:<原因>`。
     资源影响（含 13/14 条）：Flash +8.4 KB、RAM +12.1 KB（app 240,884 B / 159,896 B）。
+15. **HTTP + OTA**（2026-09-22 定型）：固件操作全部走 topic 1 的 `craner#AT...` 命令，
+    **不占用 0xA5 协议**（与 `AT+OTAINFO` / `AT+OTA_CONFIRM` 同一条通道）：
+
+    ```text
+    craner#AT+OTADL=<url> → 设备接受（HTTP 下载：URL ≤200 B、明文、200+Content-Length）
+      → 挂起心跳监督 + 暂停线程打卡监督 + 屏蔽业务发送（HTTPD 模式下串口数据会被拼进 HTTP 请求）
+      → 模块切 HTTPD（AT+HTPTP/HTPURL/HTPSV/HTPPK/HTPTIM + AT+WKMOD=HTTPD + AT+S）
+      → 串口发送请求尾 "HTTP/1.1\r\nHost:<host>\r\n\r\n" 触发 GET
+      → 响应体流入（按响应头里的 Content-Length 精确接收，含签名 TLV）
+      → 边收边写 slot1 → 收满校验 → 状态 ready
+      → 模块切回 MQTT（读回比对后只写差异项 + AT+S 保存重启，
+        再确认 AT+MQTTSTA 已建链；未建链则重启模块重试一次）
+      → 恢复心跳监督
+      → 设备继续运行旧镜像、保持 MQTT 在线
+
+    craner#AT+OTATEST   → boot_request_upgrade(TEST) + 重启 → MCUboot 安装新镜像
+    craner#AT+OTA_CONFIRM → 确认运行中的测试镜像（1 小时内不确认会回滚）
+    craner#AT+OTAINFO   → 镜像信息 + HTTP 下载状态 + Ymodem 会话状态
+    ```
+
+    * **实测 246,660 B（241 KB）用时约 32 秒（约 7.7 KB/s）**，含写入 slot1 的
+      flash 停顿；串口理论线速为 11.5 KB/s。比 MQTT+Ymodem 快一个数量级，
+      而且下载期间完全不占用 MQTT 话题；
+    * URL 要求：明文 HTTP、最长 200 字节（模块 `AT+HTPURL` 上限 256），例如
+      `http://fw.craner.hk/hook/hook_1.2.0.bin`；不支持 HTTPS 和 302 重定向；
+    * 状态查询：`AT+OTAINFO` 输出 `+OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<已写>,<期望>`
+      、`+OTASTATE:<state>,<received>,<size>` 与 `+OTASTAGED:<0|1>,v<版本>` 三行；
+    * **下载结果自动上报**：切回 MQTT 后设备在 **topic 2**
+      （`ai_safety/<dev>/ota/hook/server`，OTA 专用通道，Ymodem 进度也走这条）
+      发布一行结果，云端据此决定是否下发 `AT+OTATEST`
+      （**云端需订阅该话题**；命令应答仍在 topic 1）：
+
+      ```text
+      +OTADL:OK,<响应体字节>,<镜像字节>,v<版本>,<hash 前 8 位>
+      +OTADL:ERR,<原因>,<已收字节>,<期望字节>
+      原因：1 URL 非法、2 模块切换 HTTPD 失败、3 无响应数据、4 接收/写入/校验失败
+      ```
+
+      **只发一条、只走 topic 2**：模块会把连续无间隔（20 ms 断帧）发出的串口数据
+      合并成**一条** MQTT 消息且只认第一个通道前缀，所以"topic 1 + topic 2 各发一份"
+      会让云端收到两条内容粘在一起的乱码（实测 2026-09-24 18:01）；
+    * **暂存状态可跨复位**：下载校验通过时把镜像 SHA-256 的前 32 位写入参数
+      `ota.staged`，因此"已下载、未安装"期间即使断电/复位，重启后 `AT+OTATEST`
+      依然有效（**不需要重新下载**）；开机时若发现有暂存镜像，会在控制台和离线
+      日志里提示。`ota.staged` 会在 slot1 被新下载覆盖、`AT+OTACANCEL`、以及
+      `AT+OTA_CONFIRM` 确认安装后被清除；
+    * **下载与安装分离**：`AT+OTADL` 完成后设备继续跑旧镜像并保持 MQTT 可达，
+      收到 `AT+OTATEST` 才安装，符合"设备随时可被 MQTT 访问（除正在 OTA）"的要求；
+    * 现场命令同样是这套：`hook ota http <url>` / `hook ota test`；
+    * **失败兜底**：无论成功失败都会把模块切回 MQTT（否则设备会失去管理通道），
+      并有 10 分钟的下载总超时；下载期间 0xA5 与心跳业务静默。

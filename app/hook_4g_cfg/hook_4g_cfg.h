@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +54,19 @@ const char *hook_4g_cfg_state_name(enum hook_4g_cfg_state state);
 
 /* MQTT client id built from device.no, e.g. "ais998-hook". */
 const char *hook_4g_cfg_cid(void);
+
+/*
+ * Switch the module to HTTPD mode so it can download a file, then back to
+ * MQTT once the download is over.
+ *
+ * Both run over the synchronous AT channel and restart the module (AT+S),
+ * which is unavoidable: the module only applies a new work mode after a
+ * restart. The caller (app/hook_ota) is responsible for muting business
+ * traffic via hook_4g_set_http_mode() while HTTPD is active.
+ */
+int hook_4g_cfg_enter_httpd(const char *host, uint16_t port, const char *path,
+			    uint32_t http_timeout_s);
+int hook_4g_cfg_enter_mqtt(void);
 
 /* One line summary of the expected configuration (for "hook provision"). */
 int hook_4g_cfg_format_summary(char *buf, size_t buf_len);

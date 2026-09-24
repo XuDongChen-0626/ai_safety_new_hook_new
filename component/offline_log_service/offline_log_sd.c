@@ -1333,6 +1333,17 @@ static int try_mount(void)
 		return rc;
 	}
 	rc = fs_mount(sd_mount);
+	if (rc == -EBUSY) {
+		/*
+		 * The file system is still mounted from an earlier attempt: a
+		 * write failure only marks the card as unusable (card_mounted =
+		 * false) without unmounting it, and mounting again then fails
+		 * forever with "file system already mounted!!". Drop the old
+		 * mount and retry once.
+		 */
+		(void)fs_unmount(sd_mount);
+		rc = fs_mount(sd_mount);
+	}
 	if (rc != 0) {
 		return rc;
 	}
@@ -1400,6 +1411,7 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 			if (write_record_locked(&rec) != 0) {
 				LOG_ERR("olog: write failed, card may be gone");
 				close_log_file();
+				(void)fs_unmount(sd_mount);
 				card_mounted = false;
 			}
 			k_mutex_unlock(&sd_lock);
@@ -1424,6 +1436,7 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 		if (write_record_locked(&rec) != 0) {
 			LOG_ERR("olog: write failed, card may be gone");
 			close_log_file();
+			(void)fs_unmount(sd_mount);
 			card_mounted = false;
 		}
 		k_mutex_unlock(&sd_lock);

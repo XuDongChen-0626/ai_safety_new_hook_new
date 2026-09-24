@@ -19,6 +19,10 @@
  *   craner#AT+PARAM=<key>,<value>[,save]
  *   craner#AT+PARAM=save       -> persist dirty parameters
  *   craner#AT+PARAM=reset,<key>
+ *   craner#AT+LINK             -> craner#+LINK:<recv>,<timeouts>,<min>,<avg>,<max>,<longest>
+ *   craner#AT+LINK=clear       -> craner#OK
+ *   craner#AT+OTADL=<url>      -> craner#OK   (HTTP firmware download)
+ *   craner#AT+OTATEST          -> craner#OK   (install the downloaded image + reboot)
  *
  * "usr.cn#AT..." lines are forwarded unchanged to the usr.cn module.
  */

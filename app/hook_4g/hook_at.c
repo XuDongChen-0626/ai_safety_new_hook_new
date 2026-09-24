@@ -12,6 +12,7 @@
 
 #include "ota_manager_service.h"
 #include "hook_4g.h"
+#include "hook_heartbeat.h"
 #include "hook_ota.h"
 #include "hook_params.h"
 #include "uart_manage.h"
@@ -181,7 +182,8 @@ static int32_t hook_at_cmd_ota_info(const uint8_t *cmd, uint16_t len,
 				    hook_at_reply_fn_t reply_fn)
 {
 	char info[96];
-	char line[224];
+	char line[288];
+	char staged[OTA_MANAGER_IMAGE_VERSION_MAX_LEN + 2U] = "-";
 	int written;
 
 	ARG_UNUSED(cmd);
@@ -192,13 +194,40 @@ static int32_t hook_at_cmd_ota_info(const uint8_t *cmd, uint16_t len,
 		return HOOK_AT_ACTION_FAILED;
 	}
 
-	/* Image information and OTA session state in one reply (one console
-	 * write, otherwise the shell line editor mangles split output).
+	/* Version of the image that is waiting for AT+OTATEST, if any. */
+	if (hook_ota_staged_pending()) {
+		struct ota_manager_image_info staged_info;
+
+		if ((ota_manager_get_image_info(1U, &staged_info) == 0) &&
+		    staged_info.valid) {
+			(void)snprintf(staged, sizeof(staged), "v%s",
+				       staged_info.version);
+		}
+	}
+
+	/*
+	 * Image information plus both OTA session states in one reply (a single
+	 * console write, otherwise the shell line editor mangles split output):
+	 *
+	 *   +OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<written>,<expected>
+	 *     - the HTTP download requested with AT+OTADL
+	 *   +OTASTATE:<state>,<received>,<size>
+	 *     - the Ymodem session requested with AT+OTAREQUEST
+	 *   +OTASTAGED:<0 no|1 yes>,v<version>
+	 *     - slot1 holds a verified image waiting for AT+OTATEST, also
+	 *       after a reset (the persisted ota.staged marker)
 	 */
 	written = snprintf(line, sizeof(line),
-			   "craner#+OTAINFO%s\r\ncraner#+OTASTATE:%s,%u,%u\r\n",
-			   info, hook_ota_state_name(hook_ota_get_state()),
-			   hook_ota_bytes_received(), hook_ota_image_size());
+			   "craner#+OTAINFO%s\r\n"
+			   "craner#+OTAHTTP:%u,%u,%u\r\n"
+			   "craner#+OTASTATE:%s,%u,%u\r\n"
+			   "craner#+OTASTAGED:%u,%s\r\n",
+			   info, (unsigned int)hook_ota_http_status(),
+			   hook_ota_http_bytes(), hook_ota_http_expect_bytes(),
+			   hook_ota_state_name(hook_ota_get_state()),
+			   hook_ota_bytes_received(), hook_ota_image_size(),
+			   hook_ota_staged_pending() ? 1U : 0U,
+			   staged);
 	if ((written <= 0) || ((size_t)written >= sizeof(line))) {
 		hook_at_reply_error(reply_fn);
 		return HOOK_AT_ACTION_FAILED;
@@ -512,9 +541,139 @@ static int32_t hook_at_cmd_param(const uint8_t *cmd, uint16_t len,
 	return HOOK_AT_OK;
 }
 
+/*
+ * craner#AT+OTADL=<url>
+ *
+ * Queue an HTTP firmware download (topic 1, so the cloud and the bench use the
+ * same command). The module switches to HTTPD, MQTT comes back as soon as the
+ * download is over, and the test upgrade is requested separately.
+ */
+static int32_t hook_at_cmd_ota_download(const uint8_t *cmd, uint16_t len,
+					hook_at_reply_fn_t reply_fn)
+{
+	const uint8_t *url;
+	uint16_t url_len;
+	int ret;
+
+	if ((len <= 8U) || (cmd[8] != '=')) {
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	url = &cmd[9];
+	url_len = (uint16_t)(len - 9U);
+
+	/* The line may still carry CR/LF from the cloud frame. */
+	while ((url_len > 0U) && (hook_at_is_blank(url[url_len - 1U]) != 0U)) {
+		url_len--;
+	}
+
+	if (url_len == 0U) {
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	ret = hook_ota_http_request((const char *)url, url_len);
+	if (ret != 0) {
+		LOG_WRN("AT+OTADL rejected: %d", ret);
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	hook_at_reply_ok(reply_fn);
+
+	return HOOK_AT_OK;
+}
+
+/*
+ * craner#AT+OTATEST
+ *
+ * Install the image that a previous AT+OTADL download staged (MCUboot test
+ * upgrade) and reboot. Kept separate from the download so the device keeps
+ * running - and reachable over MQTT - until the install is asked for.
+ */
+static int32_t hook_at_cmd_ota_test(const uint8_t *cmd, uint16_t len,
+				    hook_at_reply_fn_t reply_fn)
+{
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(len);
+
+	/*
+	 * slot1 can have been staged by the HTTP session (AT+OTADL), by the
+	 * Ymodem session (AT+OTAREQUEST), or by an HTTP download that finished
+	 * before the last reset (the persisted ota.staged marker).
+	 */
+	if (!hook_ota_test_available()) {
+		LOG_WRN("AT+OTATEST: no downloaded image is staged (state=%u)",
+			hook_ota_http_status());
+		hook_at_reply_error(reply_fn);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	/* Acknowledge first: the reboot follows a short delay later. */
+	hook_at_reply_ok(reply_fn);
+
+	(void)hook_ota_test_and_reboot();
+
+	return HOOK_AT_OK;
+}
+
+/*
+ * craner#AT+LINK[=clear]
+ *
+ * Downlink quality of the 4G/MQTT link, derived from the arrival times of the
+ * host heartbeat counter. This is an engineering measurement (how stable is
+ * the downlink), not product data for the host application, so it lives on the
+ * diagnostics channel next to the other AT commands.
+ *
+ *   AT+LINK        -> craner#+LINK:<received>,<timeouts>,<min>,<avg>,<max>,<longest timeout>   [ms]
+ *   AT+LINK=clear  -> craner#OK
+ */
+static int32_t hook_at_cmd_link(const uint8_t *cmd, uint16_t len,
+				hook_at_reply_fn_t reply_fn)
+{
+	struct hook_link_stats st;
+	char line[128];
+	int written;
+
+	/* "AT+LINK" is 7 characters, so an argument starts at index 7. */
+	if ((len > 7U) && (cmd[7] == '=')) {
+		if ((len == 13U) && (memcmp(&cmd[8], "clear", 5U) == 0)) {
+			hook_heartbeat_clear_link_stats();
+			hook_at_reply_ok(reply_fn);
+			return HOOK_AT_OK;
+		}
+
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	hook_heartbeat_get_link_stats(&st);
+
+	written = snprintf(line, sizeof(line),
+			   "craner#+LINK:%u,%u,%u,%u,%u,%u\r\n",
+			   (unsigned int)st.received,
+			   (unsigned int)st.timeouts,
+			   (unsigned int)st.interval_min_ms,
+			   (unsigned int)st.interval_avg_ms,
+			   (unsigned int)st.interval_max_ms,
+			   (unsigned int)st.timeout_max_ms);
+	if ((written <= 0) || ((size_t)written >= sizeof(line))) {
+		hook_at_reply_error(reply_fn);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	hook_at_reply(reply_fn, line);
+
+	return HOOK_AT_OK;
+}
+
 static const hook_at_cmd_entry_t hook_at_cmd_table[] = {
 	{"AT", hook_at_cmd_ping},
 	{"AT+PARAM", hook_at_cmd_param},
+	{"AT+LINK", hook_at_cmd_link},
+	{"AT+OTADL", hook_at_cmd_ota_download},
+	{"AT+OTATEST", hook_at_cmd_ota_test},
 	{"AT+OTAINFO", hook_at_cmd_ota_info},
 	{"AT+OTAREQUEST", hook_at_cmd_ota_request},
 	{"AT+OTACANCEL", hook_at_cmd_ota_cancel},

@@ -31,6 +31,7 @@
 #include <zephyr/sys/util.h>
 
 #include "hook_at.h"
+#include "board.h"
 #include "hook_cloud_proto.h"
 #include "hook_health.h"
 #include "hook_ota.h"
@@ -50,9 +51,19 @@ LOG_MODULE_REGISTER(hook_4g, CONFIG_LOG_DEFAULT_LEVEL);
  * copy-while-the-ISR-overwrites race, both of which could silently drop the
  * beginning of a long modem answer.
  */
-#define HOOK_4G_RX_RING_SIZE    8192U
+/*
+ * Big enough to absorb the stalls of the HTTP OTA path: this thread writes
+ * every received block into slot1, and an internal-flash sector erase blocks
+ * it for seconds while the module keeps streaming at the serial line rate
+ * (~11 KB/s, so a 3 s erase already costs ~35 KiB).
+ */
+#define HOOK_4G_RX_RING_SIZE    131072U
 #define HOOK_4G_RX_BLOCK_SIZE   2050U
-#define HOOK_4G_RX_LENQ_DEPTH   32U
+#define HOOK_4G_RX_LENQ_DEPTH   64U
+/* Supply off-time of the module hard reset: long enough for its rails to
+ * discharge so the module really restarts from scratch.
+ */
+#define HOOK_4G_MODEM_POWER_OFF_MS 500U
 /* Console echo/hex buffers: one shell_fprintf() call per buffer (the shell
  * erases the current line on every call, so keep the number of calls small).
  */
@@ -75,6 +86,8 @@ static volatile uint32_t hook_4g_rx_frames_isr;
 static volatile uint32_t hook_4g_rx_bytes_isr;
 static volatile uint32_t hook_4g_rx_drops_isr;
 static bool hook_4g_hex_echo_enabled;
+/* True while the module is in HTTPD mode (file download in progress). */
+static volatile bool hook_4g_http_mode;
 
 void hook_4g_enable_hex_echo(bool enable)
 {
@@ -145,7 +158,8 @@ static void hook_4g_hex_dump(const uint8_t *buf, uint16_t len)
 	}
 }
 
-int hook_4g_send(const uint8_t *data, uint16_t len)
+/* Raw transmit: used by the AT channel and by the HTTP trigger. */
+static int hook_4g_send_raw(const uint8_t *data, uint16_t len)
 {
 	int ret;
 
@@ -160,6 +174,19 @@ int hook_4g_send(const uint8_t *data, uint16_t len)
 	return ret;
 }
 
+int hook_4g_send(const uint8_t *data, uint16_t len)
+{
+	/*
+	 * In HTTPD mode anything sent to the module is appended to the HTTP
+	 * request being built, so business data must not go out at all.
+	 */
+	if (hook_4g_http_mode) {
+		return -EBUSY;
+	}
+
+	return hook_4g_send_raw(data, len);
+}
+
 int hook_4g_send_ota(const uint8_t *data, uint16_t len)
 {
 	uint8_t frame[2U + 64U];
@@ -169,16 +196,54 @@ int hook_4g_send_ota(const uint8_t *data, uint16_t len)
 		return -1;
 	}
 
+	if (hook_4g_http_mode) {
+		return -EBUSY;
+	}
+
 	/* Prefix and payload must leave the MCU in one usr.cn frame. */
 	frame[0] = '2';
 	frame[1] = ',';
 	memcpy(&frame[2], data, len);
 
-	(void)k_mutex_lock(&hook_4g_tx_mutex, K_FOREVER);
-	ret = (int)uart_manage_send_by_name("4g", frame, (uint16_t)(len + 2U));
-	k_mutex_unlock(&hook_4g_tx_mutex);
+	ret = hook_4g_send_raw(frame, (uint16_t)(len + 2U));
 
 	return ret;
+}
+
+int hook_4g_http_trigger(const char *host, uint16_t port)
+{
+	char line[192];
+	int written;
+
+	if ((host == NULL) || (host[0] == '\0')) {
+		return -EINVAL;
+	}
+
+	/*
+	 * The module builds "GET <AT+HTPURL> " itself and appends whatever the
+	 * serial line delivers, so this is the tail that turns it into a valid
+	 * HTTP/1.1 request (version + Host + terminating blank line).
+	 *
+	 * The leading space covers the case where the module does NOT insert its
+	 * own separator (observed: "/s/xigzYCNUFNHTTP/1.1" -> 404): HTTP allows
+	 * several spaces between the request line elements, so a doubled space is
+	 * harmless, while a missing one produces a wrong URL.
+	 */
+	if (port == 80U) {
+		written = snprintf(line, sizeof(line),
+				   " HTTP/1.1\r\nHost:%s\r\n\r\n", host);
+	} else {
+		written = snprintf(line, sizeof(line),
+				   " HTTP/1.1\r\nHost:%s:%u\r\n\r\n", host,
+				   (unsigned int)port);
+	}
+	if ((written <= 0) || ((size_t)written >= sizeof(line))) {
+		return -EINVAL;
+	}
+
+	LOG_INF("HTTP OTA: triggering GET, %d byte(s) of request tail", written);
+
+	return hook_4g_send_raw((const uint8_t *)line, (uint16_t)written);
 }
 
 int32_t hook_4g_recv_callback(uint8_t *buf, uint16_t len)
@@ -220,6 +285,11 @@ static int32_t hook_4g_mqtt_reply(const uint8_t *buf, uint16_t len)
 	uint16_t offset = 0U;
 
 	if ((buf == NULL) || (len == 0U)) {
+		return -1;
+	}
+
+	if (hook_4g_http_mode) {
+		/* Muted: the module would append this to the HTTP request. */
 		return -1;
 	}
 
@@ -367,6 +437,64 @@ void hook_4g_modem_boot_reset(void)
 	hook_4g_modem_boot_seen_flag = false;
 }
 
+/*
+ * Hard reset of the module: cycle its 3.3 V rail (PA15 = POWER_4G_3V3).
+ *
+ * AT+S / AT+CLEAR only make the module restart itself, which is the right
+ * mechanism for "apply the configuration I just saved" but no guarantee at all
+ * against a module whose AT interpreter or MQTT client is stuck - and the
+ * module answers "OK" before it restarts, so a lost answer cannot be told
+ * apart from a lost module.
+ *
+ * Cutting the rail is the same thing a controller reset does to the module on
+ * this board (the banner comes back ~7 s after every MCU reset), so it is the
+ * reset with a guarantee. The stack keeps its state, so a staged image or the
+ * OTA progress is not affected.
+ */
+void hook_4g_modem_hard_reset(void)
+{
+	unsigned int key;
+
+	(void)gpio_pin_set_dt(&modem_power_gpio, 0);
+	k_msleep(HOOK_4G_MODEM_POWER_OFF_MS);
+	(void)gpio_pin_set_dt(&modem_power_gpio, 1);
+
+	/*
+	 * Drop whatever the module had already put on the wire: those frames
+	 * belong to the session that just died. Locked because the UART
+	 * callback fills the ring from interrupt context.
+	 */
+	key = irq_lock();
+	if (hook_4g_rx_ring_ready) {
+		lwrb_reset(&hook_4g_rx_ring);
+	}
+	k_msgq_purge(&hook_4g_frame_len_queue);
+	irq_unlock(key);
+
+	hook_4g_modem_boot_reset();
+
+	LOG_WRN("4G module hard reset: 3V3 rail off %u ms, waiting for the banner",
+		(unsigned int)HOOK_4G_MODEM_POWER_OFF_MS);
+}
+
+void hook_4g_set_http_mode(bool on)
+{
+	if (hook_4g_http_mode == on) {
+		return;
+	}
+
+	hook_4g_http_mode = on;
+
+	LOG_INF("4G channel: %s", on ?
+			"HTTPD mode (business TX muted, RX -> HTTP OTA)" :
+			"normal mode");
+}
+
+bool hook_4g_is_http_mode(void)
+{
+	return hook_4g_http_mode;
+}
+
 static void hook_4g_echo_sanitized(const uint8_t *buf, uint16_t len)
 {
 	static const uint8_t crlf[] = "\r\n";
@@ -463,10 +591,70 @@ static bool hook_4g_at_token_at(const uint8_t *buf, uint16_t len,
 	       (buf[index + token_len] == '\r');
 }
 
+/*
+ * Format up to 24 bytes as "AA BB CC " for a log line.
+ *
+ * A frame that cannot be parsed is a dead end without its bytes - the two
+ * cases that cost real debugging time were an AT answer of 24 apparently
+ * meaningless bytes (it was "+CME ERROR:50") and topic 1 commands that arrive
+ * without a known prefix.
+ */
+static void hook_4g_hex_text(char *out, size_t out_len, const uint8_t *buf,
+			     uint16_t len)
+{
+	uint16_t shown = MIN(len, 24U);
+	size_t used = 0U;
+
+	for (uint16_t i = 0U; (i < shown) && ((used + 4U) <= out_len); i++) {
+		int n = snprintf(&out[used], out_len - used, "%02X ", buf[i]);
+
+		if (n <= 0) {
+			break;
+		}
+
+		used += (size_t)n;
+	}
+
+	out[MIN(used, out_len - 1U)] = '\0';
+}
+
+/*
+ * True when the answer carries a terminal error line of its own:
+ * "+CME ERROR:<code>" (module/network error) or "+CMS ERROR:<code>". Per
+ * 27.007 such a line REPLACES the OK/ERROR terminator, so the answer is
+ * complete - and it is the module telling us that something is wrong. Without
+ * this the collector waited for its full deadline on every such answer ("AT
+ * answer incomplete after 3000 ms"), which is what made AT queries look slow.
+ */
+static bool hook_4g_at_final_error_line(const uint8_t *buf, uint16_t len)
+{
+	static const char *const names[] = { "+CME ERROR", "+CMS ERROR" };
+
+	for (size_t n = 0U; n < ARRAY_SIZE(names); n++) {
+		size_t name_len = strlen(names[n]);
+
+		if ((size_t)len < name_len) {
+			continue;
+		}
+
+		for (uint16_t i = 0U; ((size_t)i + name_len) <= (size_t)len; i++) {
+			if (memcmp(&buf[i], names[n], name_len) == 0) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 /* Classify a complete AT answer by its terminator. */
 static int hook_4g_at_tail_result(const uint8_t *buf, uint16_t len)
 {
 	uint16_t start = (len > 16U) ? (uint16_t)(len - 16U) : 0U;
+
+	if (hook_4g_at_final_error_line(buf, len)) {
+		return -EIO;
+	}
 
 	for (uint16_t i = start; i < len; i++) {
 		if (hook_4g_at_token_at(buf, len, i, "ERROR")) {
@@ -528,8 +716,40 @@ static void hook_4g_at_exchange_finish(void)
 			hook_4g_at_wait.result =
 				hook_4g_at_tail_result(hook_4g_at_buf, copy);
 			if (hook_4g_at_wait.result == -EBADMSG) {
-				LOG_WRN("AT answer carries no OK/ERROR (%u B collected)",
-					copy);
+				/*
+				 * Show what the module actually said: not every
+				 * answer is terminated by OK/ERROR (this build
+				 * answers AT+CIP with a bare "+CIP:<address>"),
+				 * and without the bytes the warning is a
+				 * dead end.
+				 */
+				char hex[(3U * 24U) + 1U];
+
+				hook_4g_hex_text(hex, sizeof(hex),
+						 hook_4g_at_buf, copy);
+				LOG_WRN("AT answer carries no OK/ERROR (%u B collected): %s",
+					copy, hex);
+			} else if ((hook_4g_at_wait.result == -EIO) &&
+				   hook_4g_at_final_error_line(hook_4g_at_buf,
+							       copy)) {
+				/* The module reported a problem itself: say what
+				 * it said, this is the useful part.
+				 */
+				char text[64];
+				size_t used = 0U;
+
+				for (uint16_t i = 0U;
+				     (i < copy) && (used < (sizeof(text) - 1U));
+				     i++) {
+					uint8_t ch = hook_4g_at_buf[i];
+
+					text[used++] =
+						((ch >= 0x20U) && (ch < 0x7FU)) ?
+							(char)ch : ' ';
+				}
+				text[used] = '\0';
+
+				LOG_WRN("AT answer is a module error: %s", text);
 			}
 		} else {
 			hook_4g_at_wait.result = -ETIMEDOUT;
@@ -669,8 +889,9 @@ int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
 	hook_4g_at_active = true;
 
 	{
-		int sent = (int)hook_4g_send((const uint8_t *)line,
-					     (uint16_t)strlen(line));
+		/* Raw: the AT channel stays usable in HTTPD mode as well. */
+		int sent = (int)hook_4g_send_raw((const uint8_t *)line,
+						 (uint16_t)strlen(line));
 
 		/* uart_manage returns UART_MANAGE_OK (0) on success. */
 		if (sent < 0) {
@@ -742,7 +963,13 @@ static void hook_4g_dispatch_topic(uint8_t topic, const uint8_t *payload,
 			return;
 		}
 
-		LOG_WRN_RATELIMIT("unmatched topic 1 frame from host");
+		{
+			char hex[(3U * 24U) + 1U];
+
+			hook_4g_hex_text(hex, sizeof(hex), payload, payload_len);
+			LOG_WRN_RATELIMIT("unmatched topic 1 frame from host "
+					  "(%u B): %s", payload_len, hex);
+		}
 		if (hook_4g_text_ratio(frame, frame_len) >= 80U) {
 			hook_4g_echo_sanitized(frame, frame_len);
 		}
@@ -771,6 +998,20 @@ static void hook_4g_dispatch_topic(uint8_t topic, const uint8_t *payload,
 	}
 }
 
+/*
+ * Module boot banner: proof that the module finished booting. The
+ * provisioning flow waits for it before its first AT command, because talking
+ * to the module while it is still starting up is unreliable.
+ */
+static void hook_4g_note_boot_banner(const uint8_t *buf, uint16_t len)
+{
+	if (!hook_4g_modem_boot_seen_flag &&
+	    hook_4g_contains(buf, len, "WH-LTE-7S1")) {
+		hook_4g_modem_boot_seen_flag = true;
+		LOG_INF("4G module boot banner seen (module is up)");
+	}
+}
+
 static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 {
 	const uint8_t *buf = block->data;
@@ -795,15 +1036,29 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	}
 
 	/*
-	 * Module boot banner: proof that the module finished booting. The
-	 * provisioning flow waits for it before its first AT command, because
-	 * talking to the module while it is still starting up is unreliable.
+	 * HTTPD mode: the module streams the HTTP response body over the serial
+	 * line. Hand it to the OTA download session - but not while a synchronous
+	 * AT exchange is running, because switching back to MQTT needs that.
 	 */
-	if (!hook_4g_modem_boot_seen_flag &&
-	    hook_4g_contains(buf, len, "WH-LTE-7S1")) {
-		hook_4g_modem_boot_seen_flag = true;
-		LOG_INF("4G module boot banner seen (module is up)");
+	if (hook_4g_http_mode && !hook_4g_at_active) {
+		if (hook_ota_http_is_armed()) {
+			(void)hook_ota_http_feed(buf, len);
+		} else {
+			/*
+			 * Not part of a response: either data that arrived
+			 * before the trigger, or the traffic of the module
+			 * restarting into/out of HTTPD mode. The boot banner
+			 * has to be recognised here as well - the provisioning
+			 * flow waits for it, and it is the one line that makes a
+			 * module restart visible in the log.
+			 */
+			hook_4g_note_boot_banner(buf, len);
+			LOG_DBG("HTTP OTA: dropped %u B outside a response", len);
+		}
+		return;
 	}
+
+	hook_4g_note_boot_banner(buf, len);
 
 	/* 1) MQTT distribution frame: "<num>,<payload>" */
 	prefix_len = hook_4g_parse_topic_prefix(buf, len, &topic);
@@ -941,7 +1196,12 @@ static void hook_4g_thread(void *a, void *b, void *c)
 	}
 }
 
-K_THREAD_STACK_DEFINE(hook_4g_stack, 4096);
+/*
+ * 8 KiB: during an HTTP OTA this thread parses the response head and calls
+ * flash_img_buffered_write() for every received block, on top of the usual
+ * frame routing - keep the margin rather than discover it at run time.
+ */
+K_THREAD_STACK_DEFINE(hook_4g_stack, 8192);
 static struct k_thread hook_4g_thread_obj;
 
 void hook_4g_init(void)

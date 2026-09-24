@@ -10,7 +10,9 @@
 
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_4g.h"
 #include "hook_heartbeat.h"
+#include "hook_ota.h"
 #include "offline_log_service.h"
 #include "system_def.h"
 #include "uart_manage.h"
@@ -85,7 +87,13 @@ static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 	tx_buf[idx++] = (uint8_t)(crc & 0xFFU);
 	tx_buf[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
 
-	(void)uart_manage_send_by_name("4g", tx_buf, idx);
+	/*
+	 * Go through hook_4g_send(): it is muted while the module is in HTTPD
+	 * mode. Sending directly to uart_manage here would push this frame into
+	 * the HTTP request the module is building (observed on the bench as
+	 * "GET /s/xxx3,\xA5g... HTTP/1.1" on the server).
+	 */
+	(void)hook_4g_send(tx_buf, idx);
 }
 
 static void hook_cloud_put_u16(uint8_t *dst, uint16_t value)
@@ -349,78 +357,6 @@ static void hook_cloud_handle_sys_error(uint8_t content_id,
 	}
 }
 
-/*
- * 0x0A link quality: how stable the 4G/MQTT downlink is, measured on the host
- * heartbeat (the crane host writes it once per second).
- *
- * Read (empty data): 20 bytes, all little endian
- *   [0..1]   heartbeats received since boot / last clear
- *   [2..3]   timeouts (gaps longer than CONFIG_HOOK_LINK_TIMEOUT_MS)
- *   [4..5]   shortest interval between two heartbeats (ms)
- *   [6..7]   average interval (ms)
- *   [8..9]   longest interval (ms)
- *   [10..11] longest timeout gap (ms)
- *   [12..15] uptime of the last timeout (ms, 0 = none)
- *   [16..19] wall clock of the last timeout (unix seconds, 0 = unknown)
- * Write (exactly one byte, value 0x5A): clears the statistics.
- * Any other write is rejected with error 0x04, so an accidental payload can
- * never wipe the statistics.
- */
-#define HOOK_CLOUD_LINK_PAYLOAD_LEN 20U
-#define HOOK_CLOUD_LINK_CLEAR_MAGIC 0x5AU
-
-static uint16_t hook_cloud_u16_sat(uint32_t value)
-{
-	return (value > 0xFFFFU) ? 0xFFFFU : (uint16_t)value;
-}
-
-static void hook_cloud_handle_link_stats(uint8_t content_id,
-					 const uint8_t *data, uint8_t data_len)
-{
-	struct hook_link_stats stats;
-	uint8_t payload[HOOK_CLOUD_LINK_PAYLOAD_LEN];
-
-	if (data_len != 0U) {
-		if ((data_len == 1U) && (data[0] == HOOK_CLOUD_LINK_CLEAR_MAGIC)) {
-			hook_heartbeat_clear_link_stats();
-			LOG_INF("link statistics cleared by the cloud (0x5A)");
-			(void)offline_log_event(OFFLINE_LOG_CAT_NETWORK,
-						OFFLINE_LOG_LEVEL_INF,
-						"4G link statistics cleared by the cloud");
-			hook_cloud_send_ack(content_id, NULL, 0U);
-			return;
-		}
-
-		{
-			uint8_t err = HOOK_CLOUD_ERR_R_W;
-
-			LOG_WRN("link statistics write rejected (len=%u value=0x%02X)",
-				data_len, data[0]);
-			hook_cloud_send_ack((uint8_t)(content_id | 0x80U), &err, 1U);
-		}
-		return;
-	}
-
-	hook_heartbeat_get_link_stats(&stats);
-
-	hook_cloud_put_u16(&payload[0], hook_cloud_u16_sat(stats.received));
-	hook_cloud_put_u16(&payload[2], hook_cloud_u16_sat(stats.timeouts));
-	hook_cloud_put_u16(&payload[4], hook_cloud_u16_sat(stats.interval_min_ms));
-	hook_cloud_put_u16(&payload[6], hook_cloud_u16_sat(stats.interval_avg_ms));
-	hook_cloud_put_u16(&payload[8], hook_cloud_u16_sat(stats.interval_max_ms));
-	hook_cloud_put_u16(&payload[10], hook_cloud_u16_sat(stats.timeout_max_ms));
-	payload[12] = (uint8_t)(stats.last_timeout_ms & 0xFFU);
-	payload[13] = (uint8_t)((stats.last_timeout_ms >> 8) & 0xFFU);
-	payload[14] = (uint8_t)((stats.last_timeout_ms >> 16) & 0xFFU);
-	payload[15] = (uint8_t)((stats.last_timeout_ms >> 24) & 0xFFU);
-	payload[16] = (uint8_t)((uint32_t)stats.last_timeout_unix_s & 0xFFU);
-	payload[17] = (uint8_t)(((uint32_t)stats.last_timeout_unix_s >> 8) & 0xFFU);
-	payload[18] = (uint8_t)(((uint32_t)stats.last_timeout_unix_s >> 16) & 0xFFU);
-	payload[19] = (uint8_t)(((uint32_t)stats.last_timeout_unix_s >> 24) & 0xFFU);
-
-	hook_cloud_send_ack(content_id, payload, sizeof(payload));
-}
-
 typedef struct {
 	uint8_t content_id;
 	void (*handler)(uint8_t content_id, const uint8_t *data, uint8_t data_len);
@@ -435,7 +371,6 @@ static const hook_cloud_handler_t hook_cloud_handlers[] = {
 	{CMD_ID_SLEEP_EN, hook_cloud_handle_sleep_en},
 	{CMD_ID_SLEEP_TIME, hook_cloud_handle_sleep_time},
 	{CMD_ID_CURRENT_TIME, hook_cloud_handle_current_time},
-	{CMD_ID_LINK_STATS, hook_cloud_handle_link_stats},
 	{CMD_ID_SYS_ERROR, hook_cloud_handle_sys_error},
 };
 

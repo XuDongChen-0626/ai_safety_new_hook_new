@@ -383,6 +383,44 @@ static size_t hook_shell_build_line(char *line, size_t line_size,
 }
 
 /*
+ * Expand the escapes a shell line cannot carry literally: \r, \n and \\.
+ *
+ * Needed for module parameters whose value contains line ends.
+ * The expansion happens in place: the result is never longer than the input.
+ */
+static size_t hook_shell_expand_escapes(char *line, size_t len, size_t max_len)
+{
+	size_t out = 0U;
+	size_t in = 0U;
+
+	while ((in < len) && (out < max_len)) {
+		if ((line[in] == '\\') && ((in + 1U) < len)) {
+			char next = line[in + 1U];
+
+			if (next == 'r') {
+				line[out++] = '\r';
+				in += 2U;
+				continue;
+			}
+			if (next == 'n') {
+				line[out++] = '\n';
+				in += 2U;
+				continue;
+			}
+			if (next == '\\') {
+				line[out++] = '\\';
+				in += 2U;
+				continue;
+			}
+		}
+
+		line[out++] = line[in++];
+	}
+
+	return out;
+}
+
+/*
  * Forward a command line to the usr.cn 4G module, e.g.
  *   hook usr AT+Z            -> sends "usr.cn#AT+Z\r\n"
  *   hook usr usr.cn#AT+Z     -> sends it unchanged
@@ -424,6 +462,71 @@ static int cmd_hook_usr(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
+	/*
+	 * "hook usr raw <data>": send plain data to the module with no "usr.cn#"
+	 * command prefix and no AT answer collection.
+	 *
+	 * Needed to drive modes where the serial data itself is the trigger - in
+	 * HTTPD mode the module turns plain serial data into the HTTP request,
+	 * while anything starting with the command word is still parsed as an AT
+	 * command and never reaches the server.
+	 */
+	if (strcmp(argv[1], "raw") == 0) {
+		size_t raw_len;
+
+		if (argc < 3U) {
+			shell_error(sh, "usage: hook usr raw <data>");
+			return -EINVAL;
+		}
+
+		raw_len = hook_shell_build_line(line, sizeof(line), NULL, argc - 1U,
+						&argv[1]);
+		if ((raw_len == 0U) || (raw_len > (sizeof(line) - 3U))) {
+			shell_error(sh, "raw data too long");
+			return -EINVAL;
+		}
+
+		raw_len = hook_shell_expand_escapes(line, raw_len,
+						    sizeof(line) - 3U);
+
+		/*
+		 * "@@" marks a CR LF: a shell line cannot carry a real CR LF in
+		 * this position. This is what lets raw data complete an HTTP
+		 * request line in HTTPD mode:
+		 *
+		 *   hook usr raw " HTTP/1.1@@Host:1.2.3.4@@@@"
+		 */
+		{
+			size_t out = 0U;
+
+			for (size_t i = 0U; i < raw_len; i++) {
+				if ((line[i] == '@') && ((i + 1U) < raw_len) &&
+				    (line[i + 1U] == '@')) {
+					line[out++] = '\r';
+					line[out++] = '\n';
+					i++;
+					continue;
+				}
+
+				line[out++] = line[i];
+			}
+
+			raw_len = out;
+		}
+
+		line[raw_len++] = '\r';
+		line[raw_len++] = '\n';
+		line[raw_len] = '\0';
+
+		if (hook_4g_send((const uint8_t *)line, (uint16_t)raw_len) < 0) {
+			shell_error(sh, "could not send raw data");
+			return -EIO;
+		}
+
+		shell_print(sh, "sent %u raw byte(s)", (unsigned int)raw_len);
+		return 0;
+	}
+
 	/* Shortcut name -> AT command. */
 	for (size_t i = 0U; i < ARRAY_SIZE(hook_usr_shortcuts); i++) {
 		if (strcmp(argv[1], hook_usr_shortcuts[i].name) == 0) {
@@ -454,6 +557,9 @@ static int cmd_hook_usr(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "command line too long");
 		return -EINVAL;
 	}
+
+	/* Allow \r / \n inside a parameter value. */
+	used = hook_shell_expand_escapes(line, used, sizeof(line) - 3U);
 
 	/* Keep the whole command in one UART frame: usr.cn needs CRLF. */
 	if (used > (sizeof(line) - 3U)) {
@@ -628,6 +734,56 @@ static int cmd_hook_provision(const struct shell *sh, size_t argc, char **argv)
 	return ret;
 }
 
+/*
+ * "hook ota http <url>": start an HTTP firmware download.
+ *
+ * Same path the cloud triggers with "craner#AT+OTADL=<url>": the module
+ * switches to HTTPD, the image is streamed into slot1, the module switches back
+ * to MQTT and the controller keeps running until "hook ota test".
+ */
+static int cmd_hook_ota_http(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc < 2U) {
+		shell_error(sh, "usage: hook ota http <http://host[:port]/path>");
+		return -EINVAL;
+	}
+
+	ret = hook_ota_http_request(argv[1], (uint32_t)strlen(argv[1]));
+	if (ret != 0) {
+		shell_error(sh, "HTTP OTA request rejected: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "HTTP OTA queued: %s", argv[1]);
+	shell_print(sh, "the 4G module switches to HTTPD; MQTT returns when it is");
+	shell_print(sh, "over. Watch the log for 'HTTP OTA:' progress.");
+
+	return 0;
+}
+
+/*
+ * "hook ota test": same as "craner#AT+OTATEST" - arm the MCUboot test
+ * upgrade for the downloaded image and reboot.
+ */
+static int cmd_hook_ota_test(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (hook_ota_http_status() != HOOK_OTA_HTTP_STAGED) {
+		shell_error(sh, "no downloaded image is staged (state=%u)",
+			    hook_ota_http_status());
+		return -EINVAL;
+	}
+
+	shell_print(sh, "arming the MCUboot test upgrade, rebooting...");
+	(void)hook_ota_test_and_reboot();
+
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	hook_ota_cmds,
 	SHELL_CMD(start, NULL, "Arm the Ymodem OTA receiver (writes slot1).",
@@ -636,6 +792,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_hook_ota_cancel),
 	SHELL_CMD(info, NULL, "Show MCUboot image information.", cmd_hook_ota_info),
 	SHELL_CMD(confirm, NULL, "Confirm the running image.", cmd_hook_ota_confirm),
+	SHELL_CMD_ARG(http, NULL,
+		      "Download a firmware over HTTP: ota http <url>",
+		      cmd_hook_ota_http, 2, 1),
+	SHELL_CMD(test, NULL,
+		  "Install the downloaded image (MCUboot test) and reboot.",
+		  cmd_hook_ota_test),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

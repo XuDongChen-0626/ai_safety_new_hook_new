@@ -21,6 +21,60 @@
 | `ai_safety/ais001/inform/hook/device_manager` | 吊钩模组 -> 上位机 | 应答/通知主题 |
 | `ai_safety/ais001/heartbeat/device_manager/hook` | 上位机 -> 吊钩模组 | 工作心跳主题（0x05 心跳帧，1 Hz） |
 
+### 2.1 固件更新（HTTP + OTA）
+
+固件更新**不占用 0xA5 协议**，全部走 topic 1 的 `craner#AT...` 命令，
+与 `AT+OTAINFO` / `AT+OTA_CONFIRM` 同一条通道（详见 README 第 15 条）：
+
+| 命令 | 作用 |
+| --- | --- |
+| `craner#AT+OTADL=<url>` | 下载固件：4G 模块切 HTTPD 拉取 URL，流式写入 slot1，完成后切回 MQTT |
+| `craner#AT+OTATEST` | 安装已下载的镜像（MCUboot test 升级）并重启；无已就绪镜像时回 `craner#ERROR` |
+| `craner#AT+OTAINFO` | 镜像信息 + HTTP 下载状态 + Ymodem 会话状态 |
+| `craner#AT+OTA_CONFIRM` | 确认运行中的测试镜像（1 小时内不确认会回滚） |
+
+`AT+OTAINFO` 的应答（一次输出四行）：
+
+```text
+craner#+OTAINFO:slot0=<...>,slot1=<...>
+craner#+OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<written>,<expected>
+craner#+OTASTATE:<state>,<received>,<size>
+craner#+OTASTAGED:<0 无|1 有>,v<版本 或 ->
+```
+
+`+OTAHTTP` 是 HTTP 下载（`AT+OTADL`）的状态，`+OTASTATE` 是 Ymodem 会话
+（`AT+OTAREQUEST`）的状态，`+OTASTAGED` 表示 slot1 是否已有一份校验通过、
+等待 `AT+OTATEST` 的镜像（**跨复位有效**，见下）。
+
+**下载结果上报（topic 2，设备 -> 云端）**：下载结束并切回 MQTT 后，设备在
+`ai_safety/<dev>/ota/hook/server`（OTA 专用通道，Ymodem 进度也走这条）发布
+一行结果，云端据此决定是否下发 `AT+OTATEST`。**云端需订阅该话题**；命令应答
+仍在 topic 1（`system/hook/server`）。
+
+```text
++OTADL:OK,<响应体字节>,<镜像字节>,v<版本>,<hash 前 8 位>
++OTADL:ERR,<原因>,<已收字节>,<期望字节>
+原因：1 URL 非法、2 模块切换 HTTPD 失败、3 无响应数据、4 接收/写入/校验失败
+```
+
+只发**一条**、只走 topic 2：模块会把连续无间隔（20 ms 断帧时间）发出的串口数据
+合并成一条 MQTT 消息，并且只认第一个通道前缀，所以同时在 topic 1 和 topic 2
+各发一份，云端会收到两条内容粘在一起的内容（实测 2026-09-24 18:01）。
+
+**暂存状态跨复位**：下载校验通过时设备把镜像 SHA-256 的前 32 位写入参数
+`ota.staged`，所以"已下载、未安装"期间即使断电或复位，重启后 `AT+OTATEST`
+仍然有效，**不需要重新下载**。该参数在 slot1 被新下载覆盖、`AT+OTACANCEL`、
+或者 `AT+OTA_CONFIRM` 确认安装后被清除；开机若发现暂存镜像，控制台与离线日志
+都会提示。
+
+流程要点：`AT+OTADL` 期间设备脱离 MQTT（模块切到 HTTPD），下载结束后**自动切回
+MQTT 并继续运行旧镜像**（`+OTAHTTP:2,...` 表示镜像已写入 slot1 并通过校验），
+直到收到 `AT+OTATEST` 才武装 MCUboot 测试升级并重启——这样设备在"已下载、未安装"
+期间始终可以通过 MQTT 访问。
+
+URL 要求：明文 `http://host[:port]/path`、≤ **200 字节**、服务器返回
+`200` + `Content-Length`（不支持 302 重定向和 `chunked`）。
+
 > 说明：`mqtt_tester.py` 中命令主题发布的是纯 0xA5 帧体（无前缀）；应答帧在 MCU 发给 4G 模组时带 `3,` 前缀，MQTT 消息体是否保留该前缀取决于 4G 模组固件/平台网关配置，现场以实测为准。
 
 ## 3. 通信链路与消息前缀（MCU <-> 4G 模组串口）

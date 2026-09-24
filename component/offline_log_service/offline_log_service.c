@@ -284,8 +284,9 @@ static void log_boot_events(void)
 		case BOOT_SWAP_TYPE_REVERT:
 			(void)offline_log_event(
 				OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
-				"OTA rollback: MCUboot reverted to the "
-				"previous image");
+				"OTA test image running without confirmation: "
+				"MCUboot will revert to the previous image on the "
+				"next reboot unless it is confirmed");
 			break;
 		case BOOT_SWAP_TYPE_FAIL:
 			(void)offline_log_event(

@@ -175,6 +175,24 @@ void hook_heartbeat_set_suspend(bool suspended)
 		 * 65 s, alarm supply cut 37 s later).
 		 */
 		hook_health_report(HOOK_HEALTH_EVENT_HOST_HEARTBEAT);
+
+		LOG_INF("heartbeat supervision resumed (4G module back)");
+		(void)offline_log_event(
+			OFFLINE_LOG_CAT_NETWORK, OFFLINE_LOG_LEVEL_INF,
+			"host heartbeat supervision resumed (module reconfiguration done)");
+	} else {
+		/*
+		 * The OTA flow parks the safety reaction on purpose (the module
+		 * restarts and cannot deliver heartbeats for tens of seconds), so
+		 * say so loudly: during this window a silent host would not cut
+		 * the alarm supply.
+		 */
+		LOG_WRN("heartbeat supervision parked (4G module reconfiguring): "
+			"host heartbeat timeout actions are temporarily disabled");
+		(void)offline_log_event(
+			OFFLINE_LOG_CAT_NETWORK, OFFLINE_LOG_LEVEL_WRN,
+			"host heartbeat supervision suspended (module reconfiguration): "
+			"safety actions temporarily disabled");
 	}
 }
 

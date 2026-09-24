@@ -83,6 +83,46 @@ bool hook_4g_at_cmd_is_active(void);
 bool hook_4g_modem_boot_seen(void);
 void hook_4g_modem_boot_reset(void);
 
+/*
+ * Hard reset of the module by cycling its supply rail.
+ *
+ * This is the recovery action when the module is unresponsive as a whole (no
+ * AT answer, or a stuck MQTT client): AT+S and AT+CLEAR only ask the module to
+ * restart itself, which a stuck module cannot do. The controller keeps
+ * running, so nothing in RAM (staged image, OTA progress) is lost.
+ *
+ * Callers must wait for the module to boot afterwards (cfg_wait_modem()).
+ */
+void hook_4g_modem_hard_reset(void);
+
+/*
+ * HTTPD mode.
+ *
+ * While the module is downloading a file over HTTP (AT+WKMOD=HTTPD), every
+ * byte it receives on the serial line is appended to the HTTP request it is
+ * building, and everything it gets back is the response body. So in this mode:
+ *
+ *   - business transmissions (heartbeat publishes, AT answer mirroring, OTA
+ *     progress on "2,") are muted - they would corrupt the request;
+ *   - received data is handed to the HTTP OTA download session instead of the
+ *     0xA5 protocol parser;
+ *   - the synchronous AT channel keeps working, because switching back to
+ *     MQTT needs it.
+ */
+void hook_4g_set_http_mode(bool on);
+bool hook_4g_is_http_mode(void);
+
+/*
+ * Trigger one HTTP request in HTTPD mode by sending the request tail the
+ * module does not build itself (version + Host header + terminating blank
+ * line). The module prepends "GET <AT+HTPURL> ".
+ *
+ * The Host header carries the port when it is not 80: the server is reached on
+ * that port (AT+HTPSV), and a Host without it makes virtual-host routing pick
+ * the wrong default.
+ */
+int hook_4g_http_trigger(const char *host, uint16_t port);
+
 #ifdef __cplusplus
 }
 #endif

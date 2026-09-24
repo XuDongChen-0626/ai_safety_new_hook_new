@@ -77,7 +77,7 @@ config HOOK_LINK_TIMEOUT_MS
 	  The crane host controller writes the heartbeat counter once per second.
 	  A gap between two received heartbeats longer than this value counts as
 	  one timeout in the link quality statistics (offline log category "4g",
-	  the "hook link" shell command and cloud command 0x0A). The timeout is
+	  the "hook link" shell command and the cloud command craner#AT+LINK). The timeout is
 	  counted once per outage, when the heartbeat comes back, so a long
 	  outage produces one log line instead of one per period.
 

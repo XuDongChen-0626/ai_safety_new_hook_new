@@ -23,6 +23,7 @@ LOG_MODULE_REGISTER(hook_params, CONFIG_LOG_DEFAULT_LEVEL);
 #define HOOK_PARAM_MQTT_USER "mqtt.user"
 #define HOOK_PARAM_MQTT_PSW  "mqtt.psw"
 #define HOOK_PARAM_MODEM_HASH "modem.cfg_hash"
+#define HOOK_PARAM_OTA_STAGED "ota.staged"
 
 #define HOOK_PARAM_VALUE_MAX 24U
 
@@ -94,6 +95,23 @@ static struct device_param_desc hook_param_table[] = {
 		 * covers parameters the module cannot read back (the password).
 		 */
 		.key = HOOK_PARAM_MODEM_HASH,
+		.type = DEVICE_PARAM_TYPE_STRING,
+		.default_value = "",
+		.flags = DEVICE_PARAM_F_PERSISTENT,
+	},
+	{
+		/*
+		 * Hash prefix (first 32 hex digits of the image SHA-256 TLV) of the
+		 * firmware sitting in slot1 that the HTTP OTA flow downloaded and
+		 * verified, waiting for "craner#AT+OTATEST" to install it. Empty =
+		 * nothing staged.
+		 *
+		 * It is persisted on purpose: without it a reset between the
+		 * download and the install would throw the image away, and slot1
+		 * alone cannot tell a freshly staged image from the previous one a
+		 * swap left behind.
+		 */
+		.key = HOOK_PARAM_OTA_STAGED,
 		.type = DEVICE_PARAM_TYPE_STRING,
 		.default_value = "",
 		.flags = DEVICE_PARAM_F_PERSISTENT,

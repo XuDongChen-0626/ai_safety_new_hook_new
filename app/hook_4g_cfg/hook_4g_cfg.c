@@ -76,6 +76,19 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 #define CFG_ATTEMPTS              3U
 #define CFG_RETRY_DELAY_MS        2000U
 #define CFG_HASH_KEY              "modem.cfg_hash"
+/*
+ * Settling time between "module has an IP address" and "the link really
+ * forwards data": measured ~5 s on the bench (the network LED keeps blinking).
+ */
+#define HOOK_4G_CFG_HTTP_NET_SETTLE_MS 5000U
+/*
+ * "Wait until the network is up" probe (AT+CIP). It polls on purpose: the
+ * module answers AT+CIP normally long before its network is usable, and an
+ * answer that never got an OK used to cost the full 5 s command timeout, so
+ * twenty tries turned into two minutes of dead time.
+ */
+#define HOOK_4G_CFG_HTTP_IP_PROBE_MS 1500U
+#define HOOK_4G_CFG_HTTP_IP_TRIES    12U
 
 /* Fixed by the cloud protocol (AISatefy-Hook-MQTT通信协议-v2.0.0). */
 #define CFG_TOPIC_PREFIX      "ai_safety"
@@ -201,19 +214,27 @@ static bool cfg_resp_has_line(const char *resp, const char *line)
  * AT+WKMOD is used as the probe rather than a bare "AT": it is the first value
  * the flow needs anyway, and it is known to be answered by this module build.
  *
- * The first command only goes out after the module printed its boot banner
- * (or after CFG_BANNER_WAIT_MS, for builds that hide the banner): sending
- * commands into a booting module is what made every probe time out.
+ * `restarting` says whether the module was just told to restart (AT+CLEAR,
+ * AT+S). Only then is it worth waiting for the boot banner before the first
+ * probe: the banner is the earliest proof that the AT interpreter is back, and
+ * probing a module that is still booting only burns a probe timeout.
+ *
+ * When the module is already running (switching work mode back and forth, for
+ * example) no banner is going to come, and waiting for one costs the whole
+ * CFG_BANNER_WAIT_MS for nothing.
  */
-static int cfg_wait_modem(uint32_t timeout_ms)
+static int cfg_wait_modem_wait(uint32_t timeout_ms, bool restarting)
 {
 	char resp[256];
 	char value[32];
 	uint32_t start = k_uptime_get_32();
 
-	while (!hook_4g_modem_boot_seen() &&
-	       ((uint32_t)(k_uptime_get_32() - start) < CFG_BANNER_WAIT_MS)) {
-		k_msleep(200);
+	if (restarting) {
+		while (!hook_4g_modem_boot_seen() &&
+		       ((uint32_t)(k_uptime_get_32() - start) <
+			CFG_BANNER_WAIT_MS)) {
+			k_msleep(200);
+		}
 	}
 
 	while ((uint32_t)(k_uptime_get_32() - start) < timeout_ms) {
@@ -227,6 +248,11 @@ static int cfg_wait_modem(uint32_t timeout_ms)
 	}
 
 	return -ETIMEDOUT;
+}
+
+static int cfg_wait_modem(uint32_t timeout_ms)
+{
+	return cfg_wait_modem_wait(timeout_ms, true);
 }
 
 static void cfg_add(const char *cmd, const char *expect, const char *read_cmd,
@@ -727,6 +753,299 @@ int hook_4g_cfg_run(bool factory)
 enum hook_4g_cfg_state hook_4g_cfg_get_state(void)
 {
 	return cfg_state;
+}
+
+int hook_4g_cfg_enter_httpd(const char *host, uint16_t port, const char *path,
+			    uint32_t http_timeout_s)
+{
+	char cmd[160];
+	char resp[256];
+	uint32_t start;
+	bool addr_ok = false;
+	int ret;
+
+	if ((host == NULL) || (host[0] == '\0') || (path == NULL) ||
+	    (path[0] == '\0')) {
+		return -EINVAL;
+	}
+
+	if (k_mutex_lock(&cfg_mutex, K_MSEC(2000)) != 0) {
+		return -EBUSY;
+	}
+
+	/*
+	 * No AT+S has been sent yet in this flow: the module is still running
+	 * in MQTT mode, so probe it directly instead of waiting 15 s for a boot
+	 * banner that only appears after a restart.
+	 */
+	if (cfg_wait_modem_wait(CFG_READY_TIMEOUT_MS, false) != 0) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	/* HTTPD parameters. The request tail (version + Host + blank line) is
+	 * sent by hook_4g_http_trigger() at download time. */
+	if (cfg_at("AT+HTPTP=GET", resp, sizeof(resp)) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	(void)snprintk(cmd, sizeof(cmd), "AT+HTPURL=%s", path);
+	if (cfg_at(cmd, resp, sizeof(resp)) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	(void)snprintk(cmd, sizeof(cmd), "AT+HTPSV=%s,%u", host,
+		       (unsigned int)port);
+	if (cfg_at(cmd, resp, sizeof(resp)) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
+	 * Keep the response headers: the HTTP OTA session parses Content-Length
+	 * from them, which is the only exact statement about how many body bytes
+	 * to expect (the MCUboot signature TLV after the image is not a fixed
+	 * size, so it cannot be derived from the image header).
+	 */
+	(void)cfg_at("AT+HTPPK=OFF", resp, sizeof(resp));
+
+	(void)snprintk(cmd, sizeof(cmd), "AT+HTPTIM=%u",
+		       (unsigned int)http_timeout_s);
+	(void)cfg_at(cmd, resp, sizeof(resp));
+
+	/* Plain HTTP: the URL scheme is not part of AT+HTPURL. */
+	(void)cfg_at("AT+SSLEN=OFF", resp, sizeof(resp));
+
+	if (cfg_at("AT+WKMOD=HTTPD", resp, sizeof(resp)) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	hook_4g_modem_boot_reset();
+	(void)cfg_at_timeout("AT+S", resp, sizeof(resp), CFG_CMD_TIMEOUT_MS);
+	if (cfg_wait_modem(CFG_READY_TIMEOUT_MS) != 0) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	if ((cfg_at("AT+WKMOD", resp, sizeof(resp)) != 0) ||
+	    (strstr(resp, "HTTPD") == NULL)) {
+		LOG_ERR("HTTP OTA: module did not report HTTPD mode");
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
+	 * The module only forwards serial data to the server once its network
+	 * is up ("wait until the network LED blinks", manual step 9): wait for
+	 * an IP address, bounded, so the download can be triggered right away.
+	 *
+	 * Only a well formed answer counts: an exchange that ends in OK, whose
+	 * "+CIP:" value is a real address and not 0.0.0.0. Anything else (an
+	 * answer without a terminator, an empty answer, an ERROR) means "not
+	 * ready yet" - measured 2026-09-23, the module answered AT+CIP with 24
+	 * bytes and no OK/ERROR for two minutes while it was bringing its
+	 * network up, and then a download that was triggered on top of that
+	 * never received a single byte. Trusting the first line that happens to
+	 * contain a dot would have turned that "not ready" into a bogus "ready".
+	 *
+	 * Polling instead of blocking is what keeps this cheap: the probe gets a
+	 * short timeout, and giving up is not fatal because the GET below is
+	 * retried - a late network costs one trigger attempt, not the whole
+	 * download.
+	 */
+	start = k_uptime_get_32();
+	for (uint32_t i = 0U; i < HOOK_4G_CFG_HTTP_IP_TRIES; i++) {
+		char value[64];
+
+		if ((cfg_at_timeout("AT+CIP", resp, sizeof(resp),
+				    HOOK_4G_CFG_HTTP_IP_PROBE_MS) == 0) &&
+		    cfg_resp_value(resp, value, sizeof(value)) &&
+		    (strchr(value, '.') != NULL) &&
+		    (strstr(value, "0.0.0.0") == NULL)) {
+			LOG_INF("HTTP OTA: module has an IP address (%s)", value);
+			addr_ok = true;
+			break;
+		}
+
+		LOG_DBG("HTTP OTA: no address yet, AT+CIP answered: %s", resp);
+		k_msleep(1000);
+	}
+
+	if (!addr_ok) {
+		uint32_t waited_s = (k_uptime_get_32() - start) / 1000U;
+
+		/*
+		 * Do not fail the download over this: the trigger is retried, so
+		 * a module that is still attaching gets a second chance. Say it
+		 * loudly, because "no address" is also what a dead network looks
+		 * like.
+		 */
+		LOG_WRN("HTTP OTA: no IP address confirmed after %u s, "
+			"triggering the GET anyway", waited_s);
+		(void)offline_log_event(
+			OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
+			"HTTP OTA: no IP address confirmed after %u s, triggering the GET anyway",
+			waited_s);
+	}
+
+	/*
+	 * An IP address is not yet a usable link: measured on the bench the
+	 * module still needs about 5 s (its network LED keeps blinking) before it
+	 * forwards serial data to the server - triggering earlier is silently
+	 * dropped.
+	 */
+	k_msleep(HOOK_4G_CFG_HTTP_NET_SETTLE_MS);
+
+	/* The AT channel answering proves the module is alive and that muting
+	 * business traffic did not break the link. */
+	if (cfg_at("AT", resp, sizeof(resp)) != 0) {
+		LOG_WRN("HTTP OTA: module does not answer AT before the trigger");
+	} else {
+		LOG_INF("HTTP OTA: module answers AT, ready for the trigger");
+	}
+
+	LOG_INF("HTTP OTA: module in HTTPD mode (%s:%u%s)", host,
+		(unsigned int)port, path);
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"HTTP OTA: module switched to HTTPD (%s:%u%s)",
+				host, (unsigned int)port, path);
+	ret = 0;
+
+out:
+	k_mutex_unlock(&cfg_mutex);
+	return ret;
+}
+
+int hook_4g_cfg_enter_mqtt(void)
+{
+	char resp[CFG_RESP_MAX];
+	bool diff[CFG_ENTRY_MAX];
+	size_t diff_count = 0U;
+	int ret;
+
+	if (k_mutex_lock(&cfg_mutex, K_MSEC(2000)) != 0) {
+		return -EBUSY;
+	}
+
+	/* The module is running (it just answered AT), no banner is coming. */
+	if (cfg_wait_modem_wait(CFG_READY_TIMEOUT_MS, false) != 0) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	cfg_build();
+
+	/*
+	 * Only the work mode has to be put back.
+	 *
+	 * HTTPD mode does not touch the MQTT side of the module, and nothing in
+	 * this flow sends AT+CLEAR (that would reset the module to its factory
+	 * defaults and make a full rewrite unavoidable - it is only used by the
+	 * factory flow in cfg_provision_once()). So the stored configuration is
+	 * read back and only the entries that really differ are written; the
+	 * read-back doubles as the verification.
+	 */
+	cfg_collect_diff(diff, &diff_count);
+
+	for (size_t i = 0U; i < cfg_entry_count; i++) {
+		if (!diff[i]) {
+			continue;
+		}
+
+		if (cfg_write_entry(&cfg_entries[i]) != 0) {
+			LOG_ERR("HTTP OTA: writing '%s' on the switch-back failed",
+				cfg_entries[i].cmd);
+			ret = -EIO;
+			goto out;
+		}
+	}
+
+	LOG_INF("HTTP OTA: switch-back wrote %u of %u configuration item(s)",
+		(unsigned int)diff_count, (unsigned int)cfg_entry_count);
+
+	/*
+	 * A new work mode only takes effect after save + module restart. When
+	 * nothing had to be written (the module already reads back as MQTT, for
+	 * example on a retry) there is nothing to save either, and an extra
+	 * restart would only delay the recovery.
+	 */
+	if (diff_count > 0U) {
+		hook_4g_modem_boot_reset();
+		(void)cfg_at_timeout("AT+S", resp, sizeof(resp), CFG_CMD_TIMEOUT_MS);
+		if (cfg_wait_modem(CFG_READY_TIMEOUT_MS) != 0) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+
+		/*
+		 * Read back once more: the module restarts again shortly after
+		 * AT+S, and a command sent during that restart is lost.
+		 */
+		cfg_collect_diff(diff, &diff_count);
+		if (diff_count > 0U) {
+			LOG_WRN("HTTP OTA: %u item(s) still differ after the switch-back",
+				(unsigned int)diff_count);
+			ret = -EAGAIN;
+			goto out;
+		}
+	}
+
+	/*
+	 * The module is out of HTTPD mode, so business traffic may flow again.
+	 * Unmute before the link check: MQTT frames (a cloud command, the host
+	 * heartbeat) that arrive while the module is still connecting would
+	 * otherwise be dropped by the HTTPD receive path.
+	 */
+	hook_4g_set_http_mode(false);
+
+	/*
+	 * A configured module is not a connected one: wait until it reports an
+	 * established MQTT session. Without this the device could look healthy
+	 * while its only management channel is down.
+	 */
+	for (uint32_t attempt = 0U; attempt < 2U; attempt++) {
+		if (cfg_verify_link() == 0) {
+			break;
+		}
+
+		if (attempt > 0U) {
+			/*
+			 * The configuration is confirmed, so this is the module's
+			 * MQTT client or the network, not the configuration.
+			 */
+			LOG_WRN("HTTP OTA: module is back in MQTT mode but not connected");
+			(void)offline_log_event(
+				OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
+				"HTTP OTA: module switched back to MQTT but has no session");
+			ret = -ENOTCONN;
+			goto out;
+		}
+
+		/*
+		 * A stale MQTT client is the one cause a module reset fixes, and
+		 * only a hard reset is guaranteed: AT+S asks a module that may
+		 * not be listening any more. The controller keeps running, so a
+		 * staged image survives.
+		 */
+		LOG_WRN("HTTP OTA: no MQTT session yet, hard-resetting the module once");
+		hook_4g_modem_hard_reset();
+		if (cfg_wait_modem(CFG_READY_TIMEOUT_MS) != 0) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+	}
+
+	LOG_INF("HTTP OTA: module switched back to MQTT and connected");
+	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"HTTP OTA: module switched back to MQTT and connected");
+	ret = 0;
+
+out:
+	k_mutex_unlock(&cfg_mutex);
+	return ret;
 }
 
 const char *hook_4g_cfg_state_name(enum hook_4g_cfg_state state)
