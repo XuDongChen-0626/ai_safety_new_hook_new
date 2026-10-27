@@ -29,26 +29,28 @@
 | 命令 | 作用 |
 | --- | --- |
 | `craner#AT+OTADL=<url>` | 下载固件：4G 模块切 HTTPD 拉取 URL，流式写入 slot1，完成后切回 MQTT |
-| `craner#AT+OTATEST` | 安装已下载的镜像（MCUboot test 升级）并重启；无已就绪镜像时回 `craner#ERROR` |
-| `craner#AT+OTAINFO` | 镜像信息 + HTTP 下载状态 + Ymodem 会话状态 |
+| `craner#AT+OTATEST=<hash8>` | 安装 hash 指定的镜像（必须是 slot1 那份）+ MCUboot test 升级并重启；hash 不存在/不在 slot1 时回 `craner#AT+OTATEST ... ERROR` |
+| `craner#AT+OTAINFO` | slot0/slot1 版本 + 8 位 hash + 状态位，以及 HTTP 下载状态 |
 | `craner#AT+OTA_CONFIRM` | 确认运行中的测试镜像（1 小时内不确认会回滚） |
 
-`AT+OTAINFO` 的应答（一次输出四行）：
+> 旧的 MQTT + Ymodem 下发链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE` 行）
+> 已删除：它与 HTTP 下载抢同一个模块、同一条链路和同一套 slot1 状态。
+> `AT+OTACANCEL` 也随之删除（不再有"暂存状态"需要撤销）。
+
+`AT+OTAINFO` 的应答：
 
 ```text
-craner#+OTAINFO:slot0=<...>,slot1=<...>
+craner#+OTAINFO:slot0=<版本>,<hash8>[,active][,confirmed]:slot1=<...>
 craner#+OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<written>,<expected>
-craner#+OTASTATE:<state>,<received>,<size>
-craner#+OTASTAGED:<0 无|1 有>,v<版本 或 ->
 ```
 
-`+OTAHTTP` 是 HTTP 下载（`AT+OTADL`）的状态，`+OTASTATE` 是 Ymodem 会话
-（`AT+OTAREQUEST`）的状态，`+OTASTAGED` 表示 slot1 是否已有一份校验通过、
-等待 `AT+OTATEST` 的镜像（**跨复位有效**，见下）。
+`+OTAHTTP` 是 HTTP 下载（`AT+OTADL`）的状态；`<hash8>` 是各 slot 镜像 SHA-256
+的前 8 位，就是 `AT+OTATEST=<hash8>` 的入参。
 
 **下载结果上报（topic 2，设备 -> 云端）**：下载结束并切回 MQTT 后，设备在
-`ai_safety/<dev>/ota/hook/server`（OTA 专用通道，Ymodem 进度也走这条）发布
-一行结果，云端据此决定是否下发 `AT+OTATEST`。**云端需订阅该话题**；命令应答
+`ai_safety/<dev>/ota/hook/server`（OTA 专用通道，设备 -> 云端，云端不再向这条
+话题下发任何数据）发布一行结果，云端据此决定是否下发 `AT+OTATEST`。
+**云端需订阅该话题**；命令应答
 仍在 topic 1（`system/hook/server`）。
 
 ```text
@@ -61,11 +63,11 @@ craner#+OTASTAGED:<0 无|1 有>,v<版本 或 ->
 合并成一条 MQTT 消息，并且只认第一个通道前缀，所以同时在 topic 1 和 topic 2
 各发一份，云端会收到两条内容粘在一起的内容（实测 2026-09-24 18:01）。
 
-**暂存状态跨复位**：下载校验通过时设备把镜像 SHA-256 的前 32 位写入参数
-`ota.staged`，所以"已下载、未安装"期间即使断电或复位，重启后 `AT+OTATEST`
-仍然有效，**不需要重新下载**。该参数在 slot1 被新下载覆盖、`AT+OTACANCEL`、
-或者 `AT+OTA_CONFIRM` 确认安装后被清除；开机若发现暂存镜像，控制台与离线日志
-都会提示。
+**安装不依赖任何持久化状态**：`AT+OTATEST` 的判据就是"slot1 里那份镜像的
+SHA-256 前缀"，全部来自 Flash，与设备的 RAM 状态无关，所以"已下载、未安装"
+期间断电或复位后，重启直接用 `AT+OTATEST=<hash8>` 仍然可以安装，
+**不需要重新下载**，也不需要曾经下发过 `AT+OTADL`。hash 可从下载结果
+（`+OTADL:OK,...,<hash8>`）或 `AT+OTAINFO` 得到；运行中的 slot0 无法被选中。
 
 流程要点：`AT+OTADL` 期间设备脱离 MQTT（模块切到 HTTPD），下载结束后**自动切回
 MQTT 并继续运行旧镜像**（`+OTAHTTP:2,...` 表示镜像已写入 slot1 并通过校验），

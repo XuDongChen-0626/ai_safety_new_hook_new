@@ -1,15 +1,16 @@
 /*
- * hook_ota.h - MQTT/4G OTA service: Ymodem -> MCUboot slot 1.
+ * hook_ota.h - HTTP OTA service (4G module downloads into MCUboot slot 1).
  *
- * The service owns the OTA session on the usr.cn "2," channel:
- *   - hook_ota_request()  : arm the transfer, send the Ymodem 'C'
- *   - hook_ota_feed()     : bytes received on the "2," channel
- *   - hook_ota_cancel()   : abort the transfer (CAN CAN) and clean up
+ * The cloud asks for a download with "craner#AT+OTADL=<url>"; the module
+ * switches to HTTPD mode and pulls the URL itself, the response body is
+ * streamed into the MCUboot secondary slot with the Zephyr flash image writer
+ * and verified against the Content-Length the server announced. The module is
+ * then switched back to MQTT and the controller keeps running the current
+ * image.
  *
- * The received image is streamed into the MCUboot secondary slot with the
- * Zephyr flash image writer, then validated and armed with
- * boot_request_upgrade(BOOT_UPGRADE_TEST); MCUboot performs the swap and the
- * rollback if the new image is not confirmed in time.
+ * "craner#AT+OTATEST" arms boot_request_upgrade(BOOT_UPGRADE_TEST) and
+ * reboots; MCUboot performs the swap and rolls back if the new image is not
+ * confirmed in time (ota_manager_service).
  */
 #ifndef HOOK_OTA_H
 #define HOOK_OTA_H
@@ -21,24 +22,9 @@
 extern "C" {
 #endif
 
-typedef enum {
-	HOOK_OTA_IDLE = 0,
-	HOOK_OTA_WAIT_START,   /* armed, waiting for the Ymodem block 0 */
-	HOOK_OTA_RECEIVING,    /* image data streaming into slot 1 */
-	HOOK_OTA_VERIFYING,    /* image written, header being checked */
-	HOOK_OTA_STAGED,       /* slot 1 verified, waiting for the test request */
-	HOOK_OTA_ERROR,
-} hook_ota_state_t;
-
 #if defined(CONFIG_HOOK_OTA_ENABLE)
 
 void hook_ota_init(void);
-
-/* Arm an OTA session (idempotent while a session is already running). */
-int hook_ota_request(void);
-
-/* Abort the session, if any. */
-void hook_ota_cancel(void);
 
 /*
  * Confirm the running image (engineer driven): clears the MCUboot test state
@@ -47,20 +33,13 @@ void hook_ota_cancel(void);
  */
 int hook_ota_confirm(void);
 
-/* True while a session is armed or receiving. */
-bool hook_ota_is_active(void);
-
-/* Feed bytes received from the OTA channel ("2," prefix stripped). */
-void hook_ota_feed(const uint8_t *data, uint16_t len);
-
 /*
  * HTTP download session (4G module in HTTPD mode).
  *
- * The module streams the HTTP response body over the serial line, so the
- * caller feeds the bytes as they arrive. The image size is not known up front
- * (the module filters the response headers, so there is no Content-Length), so
- * the session starts by collecting the MCUboot header and only then asks the
- * flash writer to open slot1:
+ * The module streams the HTTP response head and body over the serial line, so
+ * the caller feeds the bytes as they arrive. The head is parsed for
+ * Content-Length, which is the exact body size (image + signature TLV), and
+ * slot1 is opened as soon as it is known:
  *
  *   hook_ota_http_reset()          - arm, called when the download is triggered
  *   hook_ota_http_feed(data, len)  - response body bytes
@@ -85,8 +64,6 @@ int hook_ota_http_feed(const uint8_t *data, uint16_t len);
  */
 int hook_ota_http_finish(void);
 
-/* Uptime of the last received byte (0 when nothing arrived yet). */
-
 /*
  * Arm the HTTP receiver.
  *
@@ -99,7 +76,7 @@ bool hook_ota_http_is_armed(void);
 
 /* Bytes written into slot1 by the running HTTP session. */
 uint32_t hook_ota_http_bytes(void);
-/* Expected total size once the MCUboot header has been parsed (0 = unknown). */
+/* Body size the server announced (0 until the response head is parsed). */
 uint32_t hook_ota_http_expect_bytes(void);
 
 /*
@@ -123,42 +100,28 @@ enum hook_ota_http_state {
 	HOOK_OTA_HTTP_ERROR = 3,
 };
 uint8_t hook_ota_http_status(void);
+const char *hook_ota_http_state_name(uint8_t state);
 
 /*
- * Arm the MCUboot test upgrade for the image staged by the HTTP download and
- * reboot.
+ * Install one specific image.
  *
- * Kept separate from the download on purpose: the device keeps running (and
- * staying reachable over MQTT) until the cloud explicitly asks for the test.
+ * The hash prefix selects it, with the same rule as the "image test" shell
+ * command (the image must be the one in slot1). Kept separate from the
+ * download on purpose - the device keeps running (and reachable over MQTT)
+ * until the cloud asks for the test, and nothing has to be remembered in
+ * between, so it also works after a reset.
  *
- * @return 0 on success (the reboot happens at the end), -EINVAL when nothing
- *         is staged, -EIO when MCUboot refused to arm the upgrade.
+ * Two steps, because the caller has to answer before the reboot
+ * (CONFIG_HOOK_OTA_REBOOT_DELAY_MS):
+ *
+ *   hook_ota_arm_test(prefix)     - look the image up, arm the test upgrade
+ *   hook_ota_reboot_for_test(prefix) - log, wait, reboot (does not return)
  */
-int hook_ota_test_and_reboot(void);
-
-/*
- * True when there is an image ready to be installed: staged earlier in this
- * boot session, or staged by a download that finished before the last reset
- * (the persisted ota.staged marker, which is checked against the image that
- * slot1 actually holds).
- */
-bool hook_ota_test_available(void);
-
-/*
- * True when the persisted marker says slot1 holds a verified image that is
- * waiting for AT+OTATEST. Used by AT+OTAINFO and by the boot time notice; the
- * marker is written when a download is verified and cleared when slot1 is
- * overwritten, when the session is cancelled and after a confirmed install.
- */
-bool hook_ota_staged_pending(void);
+int hook_ota_arm_test(const char *hash_prefix);
+void hook_ota_reboot_for_test(const char *hash_prefix);
 
 /* Create the OTA worker thread. */
 void hook_ota_start(void);
-
-hook_ota_state_t hook_ota_get_state(void);
-const char *hook_ota_state_name(hook_ota_state_t state);
-uint32_t hook_ota_bytes_received(void);
-uint32_t hook_ota_image_size(void);
 
 #else /* !CONFIG_HOOK_OTA_ENABLE */
 
@@ -166,59 +129,8 @@ static inline void hook_ota_init(void)
 {
 }
 
-static inline int hook_ota_request(void)
-{
-	return -1;
-}
-
-static inline void hook_ota_cancel(void)
-{
-}
-
-static inline bool hook_ota_is_active(void)
-{
-	return false;
-}
-
-static inline void hook_ota_feed(const uint8_t *data, uint16_t len)
-{
-	(void)data;
-	(void)len;
-}
-
 static inline void hook_ota_start(void)
 {
-}
-
-static inline hook_ota_state_t hook_ota_get_state(void)
-{
-	return HOOK_OTA_IDLE;
-}
-
-static inline const char *hook_ota_state_name(hook_ota_state_t state)
-{
-	(void)state;
-	return "disabled";
-}
-
-static inline uint32_t hook_ota_bytes_received(void)
-{
-	return 0U;
-}
-
-static inline uint32_t hook_ota_image_size(void)
-{
-	return 0U;
-}
-
-static inline bool hook_ota_test_available(void)
-{
-	return false;
-}
-
-static inline bool hook_ota_staged_pending(void)
-{
-	return false;
 }
 
 #endif /* CONFIG_HOOK_OTA_ENABLE */

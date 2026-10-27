@@ -54,7 +54,7 @@
 | `application/app_4g.c` + `at_protocol_handler.c` + `uart_manage_handler.c` | `app/hook_4g/`（`hook_cloud_proto.c` + `hook_at.c` + `hook_4g.c`） |
 | `application/app_sys_supervisor.c`（心跳灯动画 / 工作模式） | `app/hook_supervisor/` |
 | `application/app_4g.c` 中的错误码 / 看门狗打点（旧代码已注释） | `app/hook_health/` + `module/system_health_service`（IWDG 喂狗与任务打卡） |
-| 自定义双 Bank OTA（`ota_flash_service.c` + `craner#AT+OTABOOT/OTALOCK`） | MCUboot（sysbuild, swap-using-move）+ MCUmgr（SMP over shell）+ `module/ota_manager_service` |
+| 自定义双 Bank OTA（`ota_flash_service.c` + `craner#AT+OTABOOT/OTALOCK`） | MCUboot（sysbuild, swap-using-move）+ HTTP 下载（`craner#AT+OTADL`）+ `module/ota_manager_service`（MCUmgr over shell 仍可用于本机调试） |
 | `printf_redirect` / LOGD/LOGI/LOGE 宏 | Zephyr logging（`LOG_MODULE_REGISTER`，日志经 shell 输出） |
 | 复位原因 / 故障记录（无） | `module/fault_dump_service` + Zephyr coredump |
 | RTC 备份寄存器 magic（`RTC_BKP_MAGIC_NUMBER`） | `module/time_manager_service` 的 BBRAM trust record（CRC 保护） |
@@ -86,7 +86,7 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 | `RtcPwrSched` | `app/hook_rtc` | 1 s（校准/时间发布；调度检查 5 s） | 4 |
 | `SysSupervisor` / `WorkModeTask` | `app/hook_supervisor` | 200 ms / 100 ms | 5 |
 | `HookHealth` | `app/hook_health` | 1 s | 6 |
-| `OtaTask` | `app/hook_ota` | 25 ms（事件驱动，Ymodem 接收 + slot1 写入） | 3 |
+| `OtaHttp` | `app/hook_ota` | 事件驱动（HTTP 下载编排：切 HTTPD、写 slot1、切回 MQTT） | 4 |
 
 ## 编译 / 烧录 / OTA
 
@@ -126,26 +126,13 @@ CMake 工程名 `craner_ai_safety_hook`。
 本机没有以太网，OTA 走调试串口（uart5）的 MCUmgr shell 传输，使用
 `mcumgr` 客户端：
 
-> 如果需要沿用旧上位机/云端的 **MQTT + Ymodem** 下发方式（把固件写入 slot1，
-> 由 MCUboot 负责校验、交换与回退），见
-> [docs/MQTT_Ymodem_OTA迁移方案.md](docs/MQTT_Ymodem_OTA迁移方案.md)。
-> 该方案已实现（`app/hook_ota/`），云端只需下发 MCUboot 签名镜像
-> `zephyr.signed.bin`。
-
-### OTA（MQTT + Ymodem → MCUboot slot1，已实现）
-
-现场走 4G/MQTT 时使用 `app/hook_ota`：
-
-```text
-上位机 tool-ota-mqtt-ymodem
-   → command topic : craner#AT+OTABOOT（设备进入接收态并回 'C'）
-   → OTA topic     : Ymodem 1 KiB 数据块 → 写入 slot1（bank2，运行中不阻塞）
-   → response topic: 'C'/ACK/NAK、PROGRESS,DONE,ERROR,<code>
-   → 设备自动 boot_request_upgrade(BOOT_UPGRADE_TEST) 并复位
-   → MCUboot 校验签名并交换 slot0/slot1
-   → 由工程师手动确认：craner#AT+OTA_CONFIRM（或 hook ota confirm）
-   → 若 1 小时内未确认，程序自动重启，MCUboot 回退到旧固件
-```
+> 现场走 4G/云端的固件更新统一用 **HTTP + OTA**（第 15 条）：云端在 topic 1 下发
+> `craner#AT+OTADL=<url>`，模块自己切 HTTPD 下载，写 slot1，再切回 MQTT；
+> `craner#AT+OTATEST` 安装、`craner#AT+OTA_CONFIRM` 确认。
+> 旧的 **MQTT + Ymodem** 链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE`、
+> `app/hook_ota/hook_ymodem.c`）**已整条删除**：它和 HTTP 下载抢同一个模块、
+> 同一条 4G 链路和同一套 slot1 状态，实测总会互相干扰。历史设计记录见
+> [docs/MQTT_Ymodem_OTA迁移方案.md](docs/MQTT_Ymodem_OTA迁移方案.md)（已废弃）。
 
 本机调试入口：
 
@@ -165,9 +152,9 @@ hook provision status  # 查看按 device.no 组装的 MQTT 话题/CID 与配置
 hook provision run     # 立即执行"比对 + 差异写入"（模块会重启，10~40 s）
 hook provision factory # 出厂流程：AT+CLEAR + 全量重写 + AT+S
 hook craner AT+OTAINFO # 本机 craner#AT 命令（等价 craner#AT+OTAINFO）
-hook ota start        # 手动进入接收态（等上位机发 Ymodem）
-hook ota cancel       # 中止
-hook ota info         # MCUboot 镜像信息 + OTA 会话状态
+hook ota http <url>   # 手动发起 HTTP 固件下载（等价 craner#AT+OTADL）
+hook ota test <hash>  # 按 hash 安装镜像并重启（等价 craner#AT+OTATEST=<hash>）
+hook ota info         # slot0/slot1 版本+hash 与 HTTP 下载状态
 hook ota confirm      # 确认当前镜像（等价 craner#AT+OTA_CONFIRM）
 hook rtc              # RTC 状态：I0x10~0x12 当前时间、H0x20~0x22 校准命令、trust
 hook rtc set 2026-09-16 14:30   # 写校准寄存器（等价上位机 Modbus 写 / 云端 0x09）
@@ -184,9 +171,8 @@ olog status|list|sync # SD 卡离线日志；mcumgr fs download 可远程拉取
 4G 模块的帧格式（`num,payload` 主题分发、`usr.cn#` 命令字与 `OK/ERROR` 结束标记、
 跨块重组与粘滞路由）见 [docs/4G数据帧解析.md](docs/4G数据帧解析.md)。
 
-注意：上位机选择的文件必须是 `zephyr.signed.bin`；进度文本不能含大写字母
-`C`（会被上位机误判为 Ymodem 握手/ACK）。详细设计与验证步骤见
-[docs/MQTT_Ymodem_OTA迁移方案.md](docs/MQTT_Ymodem_OTA迁移方案.md) 第 4 节。
+注意：通过 HTTP 下发的文件必须是 MCUboot 签名镜像 `zephyr.signed.bin`
+（服务器需返回 `200` + `Content-Length`，不支持 302 与 chunked）。
 
 ```powershell
 $img = "build\craner_hook_stm32h743vit6\ai_safety_new_hook\zephyr\zephyr.signed.bin"
@@ -209,7 +195,8 @@ mcumgr --conntype serial --connstring dev=COM7,baud=115200 image confirm <hash>
 也可在本机 shell 上操作：
 
 ```text
-hook ota info          # 查看 slot0/slot1 版本与状态
+hook ota info          # 查看 slot0/slot1 版本、hash 与状态
+hook ota test <hash>   # 按 hash 安装镜像（MCUboot test）并重启
 hook ota confirm       # 确认当前镜像
 hook reset             # 冷复位
 ```
@@ -220,10 +207,10 @@ hook reset             # 冷复位
 craner#AT            -> craner#OK
 craner#AT+FWTIME     -> craner#FWTIME:<编译时间>
 craner#AT+OTAINFO    -> craner#+OTAINFO:slot0=...,slot1=...
-craner#AT+OTAREQUEST -> craner#OK（允许上位机开始 MCUmgr 上传）
+craner#AT+OTADL=<url> -> craner#OK（模块切 HTTPD 下载并写入 slot1）
+craner#AT+OTATEST=<hash> -> craner#OK 后重启进该镜像（MCUboot 测试）
 craner#AT+OTA_CONFIRM -> craner#OK（工程师手动确认当前运行镜像）
-craner#AT+OTACANCEL  -> craner#OK
-craner#AT+OTABOOT    -> craner#OK 后冷复位
+craner#AT+LINK       -> craner#+LINK:<心跳统计>（=clear 清零）
 craner#AT+SYSRESET   -> 冷复位
 ```
 
@@ -407,9 +394,10 @@ tool/       开发工作流脚本
       → 恢复心跳监督
       → 设备继续运行旧镜像、保持 MQTT 在线
 
-    craner#AT+OTATEST   → boot_request_upgrade(TEST) + 重启 → MCUboot 安装新镜像
+    craner#AT+OTATEST=<hash> → 按 hash 选定镜像（必须是 slot1 那份）→
+                              boot_request_upgrade(TEST) + 重启 → MCUboot 安装
     craner#AT+OTA_CONFIRM → 确认运行中的测试镜像（1 小时内不确认会回滚）
-    craner#AT+OTAINFO   → 镜像信息 + HTTP 下载状态 + Ymodem 会话状态
+    craner#AT+OTAINFO   → slot0/slot1 版本 + 8 位 hash + 状态位 + HTTP 下载状态
     ```
 
     * **实测 246,660 B（241 KB）用时约 32 秒（约 7.7 KB/s）**，含写入 slot1 的
@@ -417,10 +405,15 @@ tool/       开发工作流脚本
       而且下载期间完全不占用 MQTT 话题；
     * URL 要求：明文 HTTP、最长 200 字节（模块 `AT+HTPURL` 上限 256），例如
       `http://fw.craner.hk/hook/hook_1.2.0.bin`；不支持 HTTPS 和 302 重定向；
-    * 状态查询：`AT+OTAINFO` 输出 `+OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<已写>,<期望>`
-      、`+OTASTATE:<state>,<received>,<size>` 与 `+OTASTAGED:<0|1>,v<版本>` 三行；
+    * **按 hash 安装，不需要任何持久化状态**：`AT+OTAINFO` 每个 slot 都带
+      8 位 hash，云端拿这个 hash（或直接用下载结果里的 hash）发
+      `AT+OTATEST=<hash8>` 即可，判据完全来自 Flash，所以**重启后随时可用**；
+      hash 必须是 slot1 里那份镜像（正在运行的 slot0 选不了，swap 后落到 slot1
+      的旧镜像也只有明确指定它的 hash 才会被装回去）；
+    * 状态查询：`AT+OTAINFO` 输出 `+OTAINFO:slot0=<版本>,<hash8>[,<状态>]:slot1=...`
+      与 `+OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<已写>,<期望>`；
     * **下载结果自动上报**：切回 MQTT 后设备在 **topic 2**
-      （`ai_safety/<dev>/ota/hook/server`，OTA 专用通道，Ymodem 进度也走这条）
+      （`ai_safety/<dev>/ota/hook/server`，OTA 专用通道，设备→云端）
       发布一行结果，云端据此决定是否下发 `AT+OTATEST`
       （**云端需订阅该话题**；命令应答仍在 topic 1）：
 
@@ -433,13 +426,13 @@ tool/       开发工作流脚本
       **只发一条、只走 topic 2**：模块会把连续无间隔（20 ms 断帧）发出的串口数据
       合并成**一条** MQTT 消息且只认第一个通道前缀，所以"topic 1 + topic 2 各发一份"
       会让云端收到两条内容粘在一起的乱码（实测 2026-09-24 18:01）；
-    * **暂存状态可跨复位**：下载校验通过时把镜像 SHA-256 的前 32 位写入参数
-      `ota.staged`，因此"已下载、未安装"期间即使断电/复位，重启后 `AT+OTATEST`
-      依然有效（**不需要重新下载**）；开机时若发现有暂存镜像，会在控制台和离线
-      日志里提示。`ota.staged` 会在 slot1 被新下载覆盖、`AT+OTACANCEL`、以及
-      `AT+OTA_CONFIRM` 确认安装后被清除；
+    * **下载与安装之间不保存任何状态**（不再使用 `ota.staged` 参数）：安装与否
+      完全由"slot1 里那份镜像的 hash"决定，所以"已下载、未安装"期间即使断电/复位，
+      重启后直接发 `AT+OTATEST=<hash8>` 依然有效（**不需要重新下载**）；开机若
+      slot1 有镜像，控制台与离线日志会打出 `slot1 image vX.Y.Z <hash8>` 及建议的
+      安装命令；
     * **下载与安装分离**：`AT+OTADL` 完成后设备继续跑旧镜像并保持 MQTT 可达，
       收到 `AT+OTATEST` 才安装，符合"设备随时可被 MQTT 访问（除正在 OTA）"的要求；
-    * 现场命令同样是这套：`hook ota http <url>` / `hook ota test`；
+    * 现场命令同样是这套：`hook ota http <url>` / `hook ota test <hash>`；
     * **失败兜底**：无论成功失败都会把模块切回 MQTT（否则设备会失去管理通道），
       并有 10 分钟的下载总超时；下载期间 0xA5 与心跳业务静默。

@@ -4,15 +4,13 @@
  * Ported from application/at_protocol_handler.c.
  *
  * The commands are the device side of the OTA / diagnostics channel that the
- * crane host controller and the cloud previously used:
+ * cloud uses (topic 1):
  *
  *   craner#AT                  -> craner#OK
  *   craner#AT+FWTIME           -> craner#FWTIME:<build date/time>
- *   craner#AT+OTAINFO          -> craner#+OTAINFO:<slot0>,<slot1>,...
- *   craner#AT+OTAREQUEST       -> craner#OK       (mark for update)
- *   craner#AT+OTABOOT          -> craner#OK then cold reboot
+ *   craner#AT+OTAINFO          -> craner#+OTAINFO:slot0=<ver>,<hash8>[...]:slot1=...
+ *                                 (+OTAHTTP:<state>,<written>,<expected>)
  *   craner#AT+OTA_CONFIRM      -> craner#OK       (confirm running image)
- *   craner#AT+OTACANCEL        -> craner#OK
  *   craner#AT+SYSRESET         -> cold reboot
  *   craner#AT+PARAM            -> craner#+PARAM:<n>;key=value;...
  *   craner#AT+PARAM=<key>      -> craner#+PARAM:<key>=<value>
@@ -22,7 +20,8 @@
  *   craner#AT+LINK             -> craner#+LINK:<recv>,<timeouts>,<min>,<avg>,<max>,<longest>
  *   craner#AT+LINK=clear       -> craner#OK
  *   craner#AT+OTADL=<url>      -> craner#OK   (HTTP firmware download)
- *   craner#AT+OTATEST          -> craner#OK   (install the downloaded image + reboot)
+ *   craner#AT+OTATEST=<hash>   -> craner#OK   (install that image + reboot,
+ *                                              same rule as "image test")
  *
  * "usr.cn#AT..." lines are forwarded unchanged to the usr.cn module.
  */

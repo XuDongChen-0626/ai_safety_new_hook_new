@@ -1,4 +1,11 @@
-﻿# 旧 MQTT + Ymodem OTA 迁移到 MCUboot 的方案
+> **已废弃（2026-09-24）**：固件更新已统一改为 **HTTP + OTA**
+> （`craner#AT+OTADL` / `AT+OTATEST` / `AT+OTA_CONFIRM`，见 README 第 15 条）。
+> MQTT + Ymodem 这条链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE`、
+> `app/hook_ota/hook_ymodem.c`）**已整条删除**：它与 HTTP 下载抢同一个 4G
+> 模块、同一条串口链路和同一套 slot1 状态，实测两者总会互相干扰。
+> 本文仅作历史设计记录保留，其中的命令与文件清单已不再对应当前代码。
+
+# 旧 MQTT + Ymodem OTA 迁移到 MCUboot 的方案
 
 对象：旧方案 = 云端/上位机 ⇄ MQTT（usr.cn 透传模块）⇄ 串口 ⇄ 自定义
 Bootloader（`D:\CXD_WorkSpace\Items\hook\hook\craner_bootloader01`）内的

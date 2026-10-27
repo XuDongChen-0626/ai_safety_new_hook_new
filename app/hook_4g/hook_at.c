@@ -155,9 +155,15 @@ int hook_at_format_image_info(char *buf, size_t buf_len)
 					"%s:slot%u=empty", (slot == 0U) ? "" : ",",
 					slot);
 		} else {
+			/*
+			 * The 8 hex digits are the image hash prefix: the cloud
+			 * needs it to install exactly that image with
+			 * "craner#AT+OTATEST=<hash>".
+			 */
 			part = snprintf(&buf[written], buf_len - (size_t)written,
-					"%s:slot%u=%s%s%s%s", (slot == 0U) ? "" : ",",
-					slot, info.version,
+					"%s:slot%u=%s,%.8s%s%s%s",
+					(slot == 0U) ? "" : ",",
+					slot, info.version, info.hash_hex,
 					((info.state_flags &
 					  OTA_MANAGER_IMAGE_STATE_ACTIVE) != 0U) ?
 						",active" : "",
@@ -181,9 +187,9 @@ int hook_at_format_image_info(char *buf, size_t buf_len)
 static int32_t hook_at_cmd_ota_info(const uint8_t *cmd, uint16_t len,
 				    hook_at_reply_fn_t reply_fn)
 {
-	char info[96];
+	/* Two slots with version, 8 hex digits of hash and up to three flags. */
+	char info[160];
 	char line[288];
-	char staged[OTA_MANAGER_IMAGE_VERSION_MAX_LEN + 2U] = "-";
 	int written;
 
 	ARG_UNUSED(cmd);
@@ -194,80 +200,27 @@ static int32_t hook_at_cmd_ota_info(const uint8_t *cmd, uint16_t len,
 		return HOOK_AT_ACTION_FAILED;
 	}
 
-	/* Version of the image that is waiting for AT+OTATEST, if any. */
-	if (hook_ota_staged_pending()) {
-		struct ota_manager_image_info staged_info;
-
-		if ((ota_manager_get_image_info(1U, &staged_info) == 0) &&
-		    staged_info.valid) {
-			(void)snprintf(staged, sizeof(staged), "v%s",
-				       staged_info.version);
-		}
-	}
-
 	/*
-	 * Image information plus both OTA session states in one reply (a single
-	 * console write, otherwise the shell line editor mangles split output):
+	 * Image information plus the HTTP OTA session state in one reply (a
+	 * single console write, otherwise the shell line editor mangles split
+	 * output):
 	 *
+	 *   +OTAINFO:slot0=<version>,<hash8>[,<flags>]:slot1=<...>
+	 *     - the hash8 of slot1 is what "AT+OTATEST=<hash8>" installs
 	 *   +OTAHTTP:<0 idle|1 downloading|2 ready|3 error>,<written>,<expected>
 	 *     - the HTTP download requested with AT+OTADL
-	 *   +OTASTATE:<state>,<received>,<size>
-	 *     - the Ymodem session requested with AT+OTAREQUEST
-	 *   +OTASTAGED:<0 no|1 yes>,v<version>
-	 *     - slot1 holds a verified image waiting for AT+OTATEST, also
-	 *       after a reset (the persisted ota.staged marker)
 	 */
 	written = snprintf(line, sizeof(line),
 			   "craner#+OTAINFO%s\r\n"
-			   "craner#+OTAHTTP:%u,%u,%u\r\n"
-			   "craner#+OTASTATE:%s,%u,%u\r\n"
-			   "craner#+OTASTAGED:%u,%s\r\n",
+			   "craner#+OTAHTTP:%u,%u,%u\r\n",
 			   info, (unsigned int)hook_ota_http_status(),
-			   hook_ota_http_bytes(), hook_ota_http_expect_bytes(),
-			   hook_ota_state_name(hook_ota_get_state()),
-			   hook_ota_bytes_received(), hook_ota_image_size(),
-			   hook_ota_staged_pending() ? 1U : 0U,
-			   staged);
+			   hook_ota_http_bytes(), hook_ota_http_expect_bytes());
 	if ((written <= 0) || ((size_t)written >= sizeof(line))) {
 		hook_at_reply_error(reply_fn);
 		return HOOK_AT_ACTION_FAILED;
 	}
 
 	hook_at_reply(reply_fn, line);
-
-	return HOOK_AT_OK;
-}
-
-static int32_t hook_at_cmd_ota_request(const uint8_t *cmd, uint16_t len,
-				       hook_at_reply_fn_t reply_fn)
-{
-	int ret;
-
-	ARG_UNUSED(cmd);
-	ARG_UNUSED(len);
-
-	/* Arm the Ymodem receiver; the host tool waits for our 'C'. */
-	ret = hook_ota_request();
-	if (ret != 0) {
-		LOG_ERR("OTA request rejected: %d", ret);
-		hook_at_reply_error(reply_fn);
-		return HOOK_AT_ACTION_FAILED;
-	}
-
-	hook_at_reply_ok(reply_fn);
-
-	return HOOK_AT_OK;
-}
-
-static int32_t hook_at_cmd_ota_cancel(const uint8_t *cmd, uint16_t len,
-				      hook_at_reply_fn_t reply_fn)
-{
-	ARG_UNUSED(cmd);
-	ARG_UNUSED(len);
-
-	LOG_INF("OTA cancel requested by host");
-	hook_ota_cancel();
-	hook_at_reply_ok(reply_fn);
 
 	return HOOK_AT_OK;
 }
@@ -288,32 +241,6 @@ static int32_t hook_at_cmd_ota_confirm(const uint8_t *cmd, uint16_t len,
 	hook_at_reply_cmd_error(reply_fn, cmd, len);
 
 	return HOOK_AT_ACTION_FAILED;
-}
-
-static int32_t hook_at_cmd_ota_boot(const uint8_t *cmd, uint16_t len,
-				    hook_at_reply_fn_t reply_fn)
-{
-	int ret;
-
-	ARG_UNUSED(cmd);
-	ARG_UNUSED(len);
-
-	/*
-	 * The host tool sends "craner#AT+OTABOOT" to start an update and then
-	 * waits for the Ymodem 'C'. The download happens inside the running
-	 * application (slot 1 is written while slot 0 keeps executing), so no
-	 * reboot into a bootloader is needed.
-	 */
-	ret = hook_ota_request();
-	if (ret != 0) {
-		LOG_ERR("OTA start rejected: %d", ret);
-		hook_at_reply_error(reply_fn);
-		return HOOK_AT_ACTION_FAILED;
-	}
-
-	hook_at_reply_ok(reply_fn);
-
-	return HOOK_AT_OK;
 }
 
 static int32_t hook_at_cmd_fw_time(const uint8_t *cmd, uint16_t len,
@@ -586,34 +513,55 @@ static int32_t hook_at_cmd_ota_download(const uint8_t *cmd, uint16_t len,
 }
 
 /*
- * craner#AT+OTATEST
+ * craner#AT+OTATEST=<hash prefix>
  *
- * Install the image that a previous AT+OTADL download staged (MCUboot test
- * upgrade) and reboot. Kept separate from the download so the device keeps
- * running - and reachable over MQTT - until the install is asked for.
+ * Install one specific image (MCUboot test upgrade) and reboot: the hash
+ * prefix selects it, exactly like the "image test" shell command. The cloud
+ * gets the hash from the download result (+OTADL:OK,...,<hash8>) or from
+ * AT+OTAINFO, so the install works at any time - also after a reset - without
+ * the device having to remember anything.
  */
 static int32_t hook_at_cmd_ota_test(const uint8_t *cmd, uint16_t len,
 				    hook_at_reply_fn_t reply_fn)
 {
-	ARG_UNUSED(cmd);
-	ARG_UNUSED(len);
+	char hash_text[OTA_MANAGER_IMAGE_HASH_HEX_LEN + 1U];
+	uint16_t hash_len;
+	size_t copy;
+
+	/* "AT+OTATEST" is 10 characters, so '=' is at index 10. */
+	if ((len <= 10U) || (cmd[10] != '=')) {
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	hash_len = (uint16_t)(len - 11U);
+
+	while ((hash_len > 0U) &&
+	       (hook_at_is_blank(cmd[11U + hash_len - 1U]) != 0U)) {
+		hash_len--;
+	}
+
+	if (hash_len == 0U) {
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
+		return HOOK_AT_ACTION_FAILED;
+	}
 
 	/*
-	 * slot1 can have been staged by the HTTP session (AT+OTADL), by the
-	 * Ymodem session (AT+OTAREQUEST), or by an HTTP download that finished
-	 * before the last reset (the persisted ota.staged marker).
+	 * The lookup runs before the reply: an unknown hash (or one that is not
+	 * the slot1 image) must answer ERROR, not arm anything.
 	 */
-	if (!hook_ota_test_available()) {
-		LOG_WRN("AT+OTATEST: no downloaded image is staged (state=%u)",
-			hook_ota_http_status());
-		hook_at_reply_error(reply_fn);
+	copy = MIN((size_t)hash_len, sizeof(hash_text) - 1U);
+	memcpy(hash_text, &cmd[11], copy);
+	hash_text[copy] = '\0';
+
+	if (hook_ota_arm_test(hash_text) != 0) {
+		hook_at_reply_cmd_error(reply_fn, cmd, len);
 		return HOOK_AT_ACTION_FAILED;
 	}
 
 	/* Acknowledge first: the reboot follows a short delay later. */
 	hook_at_reply_ok(reply_fn);
-
-	(void)hook_ota_test_and_reboot();
+	hook_ota_reboot_for_test(hash_text);
 
 	return HOOK_AT_OK;
 }
@@ -675,10 +623,7 @@ static const hook_at_cmd_entry_t hook_at_cmd_table[] = {
 	{"AT+OTADL", hook_at_cmd_ota_download},
 	{"AT+OTATEST", hook_at_cmd_ota_test},
 	{"AT+OTAINFO", hook_at_cmd_ota_info},
-	{"AT+OTAREQUEST", hook_at_cmd_ota_request},
-	{"AT+OTACANCEL", hook_at_cmd_ota_cancel},
 	{"AT+OTA_CONFIRM", hook_at_cmd_ota_confirm},
-	{"AT+OTABOOT", hook_at_cmd_ota_boot},
 	{"AT+FWTIME", hook_at_cmd_fw_time},
 	{"AT+SYSRESET", hook_at_cmd_sys_reset},
 };

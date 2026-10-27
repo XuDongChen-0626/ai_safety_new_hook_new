@@ -60,8 +60,8 @@ static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 		    hook_reg_input_get(STATUS_BMS_BATTERY), LOW_BATTERY_THRESHOLD);
 	shell_print(sh, "alarm volume   : %u", hook_reg_get(CMD_VOLUME));
 	shell_print(sh, "ota            : %s (%u/%u B)",
-		    hook_ota_state_name(hook_ota_get_state()),
-		    hook_ota_bytes_received(), hook_ota_image_size());
+		    hook_ota_http_state_name(hook_ota_http_status()),
+		    hook_ota_http_bytes(), hook_ota_http_expect_bytes());
 	shell_print(sh, "4g provisioning: %s (cid=%s)",
 		    hook_4g_cfg_state_name(hook_4g_cfg_get_state()),
 		    hook_4g_cfg_cid());
@@ -648,32 +648,6 @@ static int cmd_hook_ota_confirm(const struct shell *sh, size_t argc, char **argv
 	return 0;
 }
 
-static int cmd_hook_ota_start(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	if (hook_ota_request() != 0) {
-		shell_error(sh, "could not start the OTA receiver");
-		return -EIO;
-	}
-
-	shell_print(sh, "OTA receiver armed, waiting for a Ymodem transfer");
-
-	return 0;
-}
-
-static int cmd_hook_ota_cancel(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	hook_ota_cancel();
-	shell_print(sh, "OTA session cancelled");
-
-	return 0;
-}
-
 static int cmd_hook_reset(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -764,40 +738,40 @@ static int cmd_hook_ota_http(const struct shell *sh, size_t argc, char **argv)
 }
 
 /*
- * "hook ota test": same as "craner#AT+OTATEST" - arm the MCUboot test
- * upgrade for the downloaded image and reboot.
+ * "hook ota test <hash>": same as "craner#AT+OTATEST=<hash>" - install the
+ * image with that hash (must be the one in slot1) and reboot.
  */
 static int cmd_hook_ota_test(const struct shell *sh, size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	int ret;
 
-	if (hook_ota_http_status() != HOOK_OTA_HTTP_STAGED) {
-		shell_error(sh, "no downloaded image is staged (state=%u)",
-			    hook_ota_http_status());
+	if (argc != 2U) {
+		shell_error(sh, "usage: ota test <hash prefix>");
 		return -EINVAL;
 	}
 
-	shell_print(sh, "arming the MCUboot test upgrade, rebooting...");
-	(void)hook_ota_test_and_reboot();
+	ret = hook_ota_arm_test(argv[1]);
+	if (ret != 0) {
+		shell_error(sh, "image %s cannot be installed (%d)", argv[1], ret);
+		return ret;
+	}
+
+	shell_print(sh, "test upgrade armed for %s, rebooting...", argv[1]);
+	hook_ota_reboot_for_test(argv[1]);
 
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	hook_ota_cmds,
-	SHELL_CMD(start, NULL, "Arm the Ymodem OTA receiver (writes slot1).",
-		  cmd_hook_ota_start),
-	SHELL_CMD(cancel, NULL, "Abort the running OTA session.",
-		  cmd_hook_ota_cancel),
 	SHELL_CMD(info, NULL, "Show MCUboot image information.", cmd_hook_ota_info),
 	SHELL_CMD(confirm, NULL, "Confirm the running image.", cmd_hook_ota_confirm),
 	SHELL_CMD_ARG(http, NULL,
 		      "Download a firmware over HTTP: ota http <url>",
 		      cmd_hook_ota_http, 2, 1),
-	SHELL_CMD(test, NULL,
-		  "Install the downloaded image (MCUboot test) and reboot.",
-		  cmd_hook_ota_test),
+	SHELL_CMD_ARG(test, NULL,
+		      "Install an image by hash: ota test <hash prefix>",
+		      cmd_hook_ota_test, 2, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

@@ -389,7 +389,6 @@ static uint8_t hook_4g_text_ratio(const uint8_t *buf, uint16_t len)
 
 enum hook_4g_route {
 	HOOK_4G_ROUTE_NONE = 0,
-	HOOK_4G_ROUTE_OTA,
 	HOOK_4G_ROUTE_LEGACY,
 };
 
@@ -976,15 +975,15 @@ static void hook_4g_dispatch_topic(uint8_t topic, const uint8_t *payload,
 		break;
 	}
 
-	case 2: /* OTA topic: Ymodem image data / progress */
-		if (hook_ota_is_active()) {
-			hook_ota_feed(payload, payload_len);
-			hook_4g_last_route = HOOK_4G_ROUTE_OTA;
-			hook_4g_last_route_ms = k_uptime_get_32();
-		} else if (hook_4g_text_ratio(frame, frame_len) >= 80U) {
-			LOG_WRN_RATELIMIT("OTA data ignored: no OTA session active");
-			hook_4g_echo_sanitized(frame, frame_len);
-		}
+	case 2: /* OTA topic: device -> cloud only (results, +OTADL:...) */
+		/*
+		 * Firmware never arrives over MQTT any more: the module pulls it
+		 * over HTTP (AT+OTADL). Anything the cloud sends here is ignored
+		 * and shown, so a misconfigured sender is visible instead of
+		 * silently feeding the image parser.
+		 */
+		LOG_WRN_RATELIMIT("topic 2 is device -> cloud only, frame ignored");
+		hook_4g_echo_sanitized(frame, frame_len);
 		break;
 
 	default: /* 0 = temporary topic, 3..10 = host management topics */
@@ -1081,27 +1080,48 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	if ((hook_4g_last_route != HOOK_4G_ROUTE_NONE) &&
 	    ((uint32_t)(k_uptime_get_32() - hook_4g_last_route_ms) <
 	     HOOK_4G_ROUTE_STICKY_MS)) {
-		if (hook_4g_last_route == HOOK_4G_ROUTE_OTA) {
-			if (hook_ota_is_active()) {
-				hook_ota_feed(buf, len);
-			}
-		} else {
-			hook_cloud_proto_feed(buf, len);
-		}
+		hook_cloud_proto_feed(buf, len);
 		return;
 	}
 	hook_4g_last_route = HOOK_4G_ROUTE_NONE;
 
 	/* 4) Module's own text (usr.cn# echo or plain AT answer). */
 	if ((len >= 7U) && (memcmp(buf, "usr.cn#", 7U) == 0)) {
-		(void)hook_console_send(&buf[7], (uint16_t)(len - 7U));
-		(void)hook_4g_mqtt_reply(&buf[7], (uint16_t)(len - 7U));
+		const uint8_t *body = &buf[7];
+		uint16_t body_len = (uint16_t)(len - 7U);
+
+		(void)hook_console_send(body, body_len);
+
+		/*
+		 * "usr.cn#AT..." is the module echoing a command line we sent -
+		 * the boot provisioning probes AT+WKMOD, the cloud's own
+		 * usr.cn#AT passthrough does the same. Mirroring the echo would
+		 * put our request back on the command topic (seen as
+		 * "WH-LTE-7S1 usr.cn#AT+WKMOD" after a module restart, merged
+		 * with the boot banner by the module's 20 ms framing). The
+		 * answer to those commands arrives in its own frames and is
+		 * still mirrored, so only the echo is dropped from MQTT.
+		 * Anything else the module prefixes with usr.cn# is kept.
+		 */
+		if (!((body_len >= 2U) && (body[0] == 'A') &&
+		      (body[1] == 'T'))) {
+			(void)hook_4g_mqtt_reply(body, body_len);
+		}
 		return;
 	}
 
 	if (hook_4g_is_printable_text(buf, len)) {
 		hook_4g_echo_sanitized(buf, len);
-		(void)hook_4g_mqtt_reply(buf, len);
+
+		/*
+		 * The boot banner stays on the console/log ("4G module boot banner
+		 * seen"): mirroring it would put "WH-LTE-7S1" on the command topic
+		 * every time the module (re)starts, where the cloud expects answers
+		 * to its commands.
+		 */
+		if (!hook_4g_contains(buf, len, "WH-LTE-7S1")) {
+			(void)hook_4g_mqtt_reply(buf, len);
+		}
 		return;
 	}
 
@@ -1124,8 +1144,8 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 
 static void hook_4g_thread(void *a, void *b, void *c)
 {
-	/* 2 KiB scratch outside the thread stack (a frame may hold a whole
-	 * Ymodem packet).
+	/* 2 KiB scratch outside the thread stack: one frame can carry a whole
+	 * usr.cn message (an OTA/HTP response chunk, an AT answer dump).
 	 */
 	static struct hook_4g_rx_block rx_block;
 	uint32_t last_err_check_ms = 0U;

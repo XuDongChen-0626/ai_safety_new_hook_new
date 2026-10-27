@@ -1,12 +1,20 @@
 /*
- * hook_ota.c - MQTT/4G OTA service (Ymodem -> MCUboot slot 1).
+ * hook_ota.c - HTTP OTA service (4G module downloads into MCUboot slot 1).
  *
  * Data flow:
- *   host tool --MQTT--> usr.cn --usart1 "2,"--> hook_4g --> hook_ota_feed()
- *   --> Ymodem receiver --> flash_img (slot 1) --> boot_request_upgrade()
+ *   cloud --MQTT topic 1--> "craner#AT+OTADL=<url>"
+ *   --> 4G module switches to HTTPD and downloads the URL itself
+ *   --> usart1 --> hook_4g --> hook_ota_http_feed() --> flash_img (slot 1)
+ *   --> module switches back to MQTT, image verified and staged
+ *   --> "craner#AT+OTATEST" arms the MCUboot test upgrade and reboots
  *
- * Responses ('C' / ACK / NAK / CAN and progress text) go back on the same
- * "2," channel, which the usr.cn module routes to the OTA response topic.
+ * There is no Ymodem/MQTT firmware transfer any more: it fought over the same
+ * module, the same 4G stack and the same slot1 bookkeeping as the HTTP path,
+ * and the two could not be told apart reliably. All firmware operations live
+ * on the craner#AT command surface.
+ *
+ * The download result goes back on usr.cn channel 2, which the module routes
+ * to ai_safety/<dev>/ota/hook/server.
  */
 #include "hook_ota.h"
 
@@ -24,11 +32,8 @@
 #include "hook_4g.h"
 #include "hook_4g_cfg.h"
 #include "hook_heartbeat.h"
-#include "hook_params.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
-#include "hook_ymodem.h"
-#include "device_param_server.h"
 #include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "ota_manager_service.h"
@@ -37,86 +42,15 @@
 
 LOG_MODULE_REGISTER(hook_ota, CONFIG_LOG_DEFAULT_LEVEL);
 
-#define HOOK_OTA_CHANNEL "4g"
-#define HOOK_OTA_CHANNEL_PREFIX "2,"
-#define HOOK_OTA_RX_BLOCK_SIZE 256U
-#define HOOK_OTA_RX_QUEUE_DEPTH 16U
-#define HOOK_OTA_THREAD_PERIOD_MS 20U
-#define HOOK_OTA_PROGRESS_STEP_BYTES 16384U
-
-struct hook_ota_rx_block {
-	uint16_t len;
-	uint8_t data[HOOK_OTA_RX_BLOCK_SIZE];
-};
-
-K_MSGQ_DEFINE(hook_ota_rx_queue, sizeof(struct hook_ota_rx_block),
-	      HOOK_OTA_RX_QUEUE_DEPTH, 4);
-
-static hook_ota_state_t hook_ota_state;
-static uint32_t hook_ota_rx_drops;
-static uint32_t hook_ota_last_activity_ms;
-static uint32_t hook_ota_last_progress_bytes;
-static uint32_t hook_ota_last_crc_request_ms;
 static struct flash_img_context hook_ota_flash_ctx;
 static bool hook_ota_flash_active;
-
-static void hook_ota_set_state(hook_ota_state_t state)
-{
-	if (hook_ota_state != state) {
-		LOG_INF("OTA state: %s -> %s", hook_ota_state_name(hook_ota_state),
-			hook_ota_state_name(state));
-		hook_ota_state = state;
-	}
-}
-
-const char *hook_ota_state_name(hook_ota_state_t state)
-{
-	switch (state) {
-	case HOOK_OTA_IDLE:
-		return "idle";
-	case HOOK_OTA_WAIT_START:
-		return "wait_start";
-	case HOOK_OTA_RECEIVING:
-		return "receiving";
-	case HOOK_OTA_VERIFYING:
-		return "verifying";
-	case HOOK_OTA_STAGED:
-		return "staged";
-	case HOOK_OTA_ERROR:
-		return "error";
-	default:
-		return "unknown";
-	}
-}
-
-hook_ota_state_t hook_ota_get_state(void)
-{
-	return hook_ota_state;
-}
-
-uint32_t hook_ota_bytes_received(void)
-{
-	const hook_ymodem_file_info_t *file = hook_ymodem_get_file_info();
-
-	return (file != NULL) ? file->bytes_received : 0U;
-}
-
-uint32_t hook_ota_image_size(void)
-{
-	const hook_ymodem_file_info_t *file = hook_ymodem_get_file_info();
-
-	return (file != NULL) ? file->size : 0U;
-}
-
-bool hook_ota_is_active(void)
-{
-	return (hook_ota_state == HOOK_OTA_WAIT_START) ||
-	       (hook_ota_state == HOOK_OTA_RECEIVING) ||
-	       (hook_ota_state == HOOK_OTA_VERIFYING);
-}
+/* Single OTA session state (see enum hook_ota_http_state). */
+static volatile uint8_t hook_ota_http_state_value;
 
 /*
- * OTA channel helpers (usr.cn channel 2 = OTA data / progress).
+ * OTA result channel (usr.cn channel 2 -> ai_safety/<dev>/ota/hook/server).
+ * It is publish only: the cloud never sends firmware data over MQTT any more,
+ * the module downloads it over HTTP instead.
  */
 static int hook_ota_channel_send(const uint8_t *data, uint16_t len)
 {
@@ -127,360 +61,7 @@ static int hook_ota_channel_send(const uint8_t *data, uint16_t len)
 	return hook_4g_send_ota(data, len);
 }
 
-static void hook_ota_report(const char *text)
-{
-	(void)hook_ota_channel_send((const uint8_t *)text, (uint16_t)strlen(text));
-}
 
-/*
- * ---------------------------------------------------------------------------
- * Staged image marker (persisted)
- * ---------------------------------------------------------------------------
- *
- * "An image is downloaded and verified, waiting for AT+OTATEST" has to survive
- * a controller reset: a RAM flag cannot, and slot1 alone cannot tell a freshly
- * staged image from the previous one that a swap left behind - both are valid
- * MCUboot images, and installing the old one again is a silent downgrade.
- *
- * So the hash prefix of the staged image is kept in the parameter store
- * ("ota.staged"). It is invalidated whenever slot1 no longer holds that image,
- * when a new download starts writing slot1, and by AT+OTACANCEL / a confirmed
- * install.
- */
-#define HOOK_OTA_STAGED_KEY      "ota.staged"
-#define HOOK_OTA_STAGED_HASH_HEX 32U
-
-/* Hash prefix of the image in slot1 (false when slot1 holds nothing valid). */
-static bool hook_ota_slot1_hash(char *out, size_t out_len)
-{
-	struct ota_manager_image_info info;
-
-	if ((out == NULL) || (out_len < (HOOK_OTA_STAGED_HASH_HEX + 1U))) {
-		return false;
-	}
-
-	if ((ota_manager_get_image_info(1U, &info) != 0) || !info.valid) {
-		return false;
-	}
-
-	memcpy(out, info.hash_hex, HOOK_OTA_STAGED_HASH_HEX);
-	out[HOOK_OTA_STAGED_HASH_HEX] = '\0';
-
-	return true;
-}
-
-/* Write the marker ("" clears it). Only touches the store when it changes. */
-static void hook_ota_staged_marker_write(const char *value)
-{
-	char current[HOOK_OTA_STAGED_HASH_HEX + 1U];
-
-	if (hook_params_get(HOOK_OTA_STAGED_KEY, current, sizeof(current)) != 0) {
-		current[0] = '\0';
-	}
-
-	if (strcmp(current, value) == 0) {
-		return;
-	}
-
-	if (hook_params_set(HOOK_OTA_STAGED_KEY, value) != 0) {
-		LOG_ERR("staged marker: could not be updated");
-		return;
-	}
-
-	/*
-	 * The marker is only useful once it is in flash. An unsaved "param set"
-	 * of the engineer is persisted together with it - say so rather than
-	 * doing it silently.
-	 */
-	{
-		struct device_param_status status;
-
-		device_param_server_get_status(&status);
-		if (status.dirty) {
-			LOG_WRN("staged marker: an unsaved parameter change is "
-				"persisted with it");
-		}
-	}
-
-	if (hook_params_save() != 0) {
-		LOG_ERR("staged marker: could not be saved");
-	}
-}
-
-/* Remember the image slot1 now holds as "staged". */
-static void hook_ota_staged_marker_set(void)
-{
-	char hash[HOOK_OTA_STAGED_HASH_HEX + 1U];
-
-	if (!hook_ota_slot1_hash(hash, sizeof(hash))) {
-		LOG_WRN("staged marker: slot1 holds no valid image");
-		return;
-	}
-
-	hook_ota_staged_marker_write(hash);
-}
-
-static void hook_ota_staged_marker_clear(void)
-{
-	hook_ota_staged_marker_write("");
-}
-
-bool hook_ota_staged_pending(void)
-{
-	char marker[HOOK_OTA_STAGED_HASH_HEX + 1U];
-	char hash[HOOK_OTA_STAGED_HASH_HEX + 1U];
-
-	marker[0] = '\0';
-	if (hook_params_get(HOOK_OTA_STAGED_KEY, marker, sizeof(marker)) != 0) {
-		return false;
-	}
-
-	if (marker[0] == '\0') {
-		return false;
-	}
-
-	/* The image must still be there, otherwise the marker is stale. */
-	if (!hook_ota_slot1_hash(hash, sizeof(hash)) ||
-	    (strcmp(marker, hash) != 0)) {
-		LOG_WRN("staged marker %s no longer matches slot1", marker);
-		return false;
-	}
-
-	return true;
-}
-
-bool hook_ota_test_available(void)
-{
-	return (hook_ota_get_state() == HOOK_OTA_STAGED) ||
-	       (hook_ota_http_status() == HOOK_OTA_HTTP_STAGED) ||
-	       hook_ota_staged_pending();
-}
-
-static void hook_ota_report_progress(bool force)
-{
-	char text[48];
-	uint32_t received = hook_ota_bytes_received();
-	uint32_t total = hook_ota_image_size();
-	int written;
-
-	if (!force &&
-	    ((received - hook_ota_last_progress_bytes) <
-	     HOOK_OTA_PROGRESS_STEP_BYTES)) {
-		return;
-	}
-
-	hook_ota_last_progress_bytes = received;
-
-	/* NOTE: the host tool scans response payloads for Ymodem control bytes,
-	 * so progress text must not contain an upper case 'C' (0x43).
-	 */
-	written = snprintf(text, sizeof(text), "PROGRESS,%u,%u", received, total);
-	if ((written > 0) && ((size_t)written < sizeof(text))) {
-		hook_ota_report(text);
-	}
-}
-
-/*
- * Ymodem callbacks.
- */
-static int hook_ota_ymodem_send(const uint8_t *data, uint16_t len, void *user)
-{
-	ARG_UNUSED(user);
-
-	return hook_ota_channel_send(data, len);
-}
-
-static int hook_ota_ymodem_file_begin(const hook_ymodem_file_info_t *file,
-				      void *user)
-{
-	uint32_t slot_size;
-	int ret;
-
-	ARG_UNUSED(user);
-
-	if ((file == NULL) || (file->size_valid == 0U) || (file->size == 0U)) {
-		LOG_ERR("OTA image size missing in the Ymodem header");
-		return -1;
-	}
-
-	slot_size = PARTITION_SIZE(slot1_partition);
-	if (file->size > slot_size) {
-		LOG_ERR("image %u B does not fit into slot1 (%u B)", file->size,
-			slot_size);
-		return -1;
-	}
-
-	ret = flash_img_init(&hook_ota_flash_ctx);
-	if (ret != 0) {
-		LOG_ERR("flash_img_init failed: %d", ret);
-		return -1;
-	}
-
-	hook_ota_flash_active = true;
-	hook_ota_last_progress_bytes = 0U;
-	hook_ota_set_state(HOOK_OTA_RECEIVING);
-
-	LOG_INF("OTA image '%s' (%u B) -> slot1 (%u B)", file->name, file->size,
-		slot_size);
-	hook_ota_report_progress(true);
-
-	return 0;
-}
-
-static int hook_ota_ymodem_file_data(const uint8_t *data, uint16_t len,
-				     uint32_t offset, void *user)
-{
-	int ret;
-
-	ARG_UNUSED(user);
-	ARG_UNUSED(offset);
-
-	if (!hook_ota_flash_active) {
-		return -1;
-	}
-
-	ret = flash_img_buffered_write(&hook_ota_flash_ctx, data, len, false);
-	if (ret != 0) {
-		LOG_ERR("flash write failed at %u: %d", offset, ret);
-		return -1;
-	}
-
-	hook_ota_report_progress(false);
-
-	return 0;
-}
-
-static void hook_ota_ymodem_file_end(const hook_ymodem_file_info_t *file,
-				     void *user)
-{
-	struct mcuboot_img_header header;
-	uint32_t written;
-	size_t expected_min;
-	int ret;
-
-	ARG_UNUSED(user);
-
-	hook_ota_set_state(HOOK_OTA_VERIFYING);
-
-	if (!hook_ota_flash_active) {
-		LOG_ERR("OTA finished without an open flash context");
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,9");
-		return;
-	}
-
-	/* Flush the remaining buffered block into slot 1. */
-	ret = flash_img_buffered_write(&hook_ota_flash_ctx, NULL, 0U, true);
-	hook_ota_flash_active = false;
-	if (ret != 0) {
-		LOG_ERR("flash flush failed: %d", ret);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,10");
-		return;
-	}
-
-	written = (uint32_t)flash_img_bytes_written(&hook_ota_flash_ctx);
-	hook_ota_report_progress(true);
-
-	if ((file != NULL) && (file->size_valid != 0U) && (written < file->size)) {
-		LOG_ERR("short write: %u of %u B", written, file->size);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,11");
-		return;
-	}
-
-	/* Verify that an MCUboot image (not a raw binary) landed in slot 1. */
-	memset(&header, 0, sizeof(header));
-	ret = boot_read_bank_header(PARTITION_ID(slot1_partition), &header,
-				    sizeof(header));
-	if (ret != 0) {
-		LOG_ERR("slot1 does not hold a valid MCUboot image: %d", ret);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,12");
-		return;
-	}
-
-	expected_min = (size_t)header.h.v1.image_size + 0x20U;
-	if ((header.h.v1.image_size == 0U) ||
-	    ((file != NULL) && (file->size_valid != 0U) &&
-	     ((size_t)file->size < expected_min))) {
-		LOG_ERR("slot1 image header inconsistent (img=%u file=%u)",
-			header.h.v1.image_size,
-			(file != NULL) ? file->size : 0U);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,13");
-		return;
-	}
-
-	LOG_INF("slot1 image valid: v%u.%u.%u img=%u B (file %u B)",
-		header.h.v1.sem_ver.major, header.h.v1.sem_ver.minor,
-		header.h.v1.sem_ver.revision, header.h.v1.image_size,
-		(file != NULL) ? file->size : 0U);
-
-	/* Arm the test upgrade: MCUboot swaps on the next reset. */
-	ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
-	if (ret != 0) {
-		LOG_ERR("boot_request_upgrade failed: %d", ret);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		hook_ota_report("ERROR,14");
-		return;
-	}
-
-	hook_health_ota_gate(false);
-	hook_ota_set_state(HOOK_OTA_STAGED);
-
-	/*
-	 * Persist what was staged: the cloud may install it minutes or hours
-	 * later, and the marker is what makes AT+OTATEST survive a reset in
-	 * between.
-	 */
-	hook_ota_staged_marker_set();
-	hook_ota_report("DONE");
-
-	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
-				"OTA staged: slot1 image v%u.%u.%u (%u B) verified, "
-				"waiting for the test request",
-				header.h.v1.sem_ver.major,
-				header.h.v1.sem_ver.minor,
-				header.h.v1.sem_ver.revision,
-				header.h.v1.image_size);
-
-	/*
-	 * No automatic reboot: the swap is armed and happens on the next reset,
-	 * which is asked for explicitly with AT+OTATEST so the device stays
-	 * reachable over MQTT until then.
-	 */
-	LOG_WRN("OTA staged: slot1 armed, AT+OTATEST installs it");
-}
-
-static void hook_ota_ymodem_abort(hook_ymodem_status_t reason, void *user)
-{
-	ARG_UNUSED(user);
-
-	hook_ota_flash_active = false;
-	hook_ota_set_state(HOOK_OTA_ERROR);
-	hook_ota_report((reason == HOOK_YMODEM_ERR_ABORTED) ? "ERROR,20" :
-							      "ERROR,21");
-	hook_health_ota_gate(false);
-
-	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_ERR,
-				"OTA aborted (reason=%d), staying on the running image",
-				(int)reason);
-
-	LOG_ERR("OTA aborted (reason=%d), staying on the running image",
-		(int)reason);
-}
-
-static const hook_ymodem_config_t hook_ota_ymodem_config = {
-	.send = hook_ota_ymodem_send,
-	.on_file_begin = hook_ota_ymodem_file_begin,
-	.on_file_data = hook_ota_ymodem_file_data,
-	.on_file_end = hook_ota_ymodem_file_end,
-	.on_abort = hook_ota_ymodem_abort,
-	.user = NULL,
-	.max_errors = CONFIG_HOOK_OTA_MAX_ERRORS,
-	.packet_timeout_ms = CONFIG_HOOK_OTA_PACKET_TIMEOUT_MS,
-};
 
 /*
  * ---------------------------------------------------------------------------
@@ -603,13 +184,6 @@ static int hook_ota_http_open_slot(uint32_t body_len)
 
 	hook_ota_flash_active = true;
 	hook_ota_http_expected = body_len;
-	hook_ota_set_state(HOOK_OTA_RECEIVING);
-
-	/*
-	 * Slot1 is about to be overwritten, so whatever was staged before is
-	 * gone - do not let a stale marker survive into the new session.
-	 */
-	hook_ota_staged_marker_clear();
 
 	LOG_INF("HTTP OTA: slot1 open, expecting %u B (from Content-Length)",
 		body_len);
@@ -626,8 +200,6 @@ int hook_ota_http_finish(void)
 	struct mcuboot_img_header header;
 	uint32_t written;
 	int ret;
-
-	hook_ota_set_state(HOOK_OTA_VERIFYING);
 
 	/* The response is complete: stop feeding the body into the session. */
 	hook_ota_http_armed = false;
@@ -660,12 +232,11 @@ int hook_ota_http_finish(void)
 		header.h.v1.sem_ver.revision, header.h.v1.image_size);
 
 	hook_health_ota_gate(false);
-	hook_ota_set_state(HOOK_OTA_STAGED);
 
 	/*
 	 * Deliberately NOT boot_request_upgrade() here: the device stays on the
 	 * running image (and therefore reachable over MQTT) until the cloud asks
-	 * for the test, see hook_ota_test_and_reboot().
+	 * for the test by hash, see hook_ota_test_and_reboot().
 	 */
 	LOG_INF("HTTP OTA ready: slot1 image v%u.%u.%u (%u B) verified, "
 		"waiting for the test request",
@@ -681,7 +252,7 @@ int hook_ota_http_finish(void)
 	return 1;
 
 error:
-	hook_ota_set_state(HOOK_OTA_ERROR);
+	hook_ota_http_state_value = HOOK_OTA_HTTP_ERROR;
 	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_ERR,
 				"HTTP OTA failed after %u B, staying on the running image",
 				hook_ota_http_received);
@@ -797,10 +368,8 @@ int hook_ota_http_feed(const uint8_t *data, uint16_t len)
 	return (hook_ota_http_received >= hook_ota_http_expected) ? 1 : 0;
 
 fail:
-	/* Slot1 now holds a partial image: forget the staged marker. */
-	hook_ota_staged_marker_clear();
 	hook_ota_http_reset();
-	hook_ota_set_state(HOOK_OTA_ERROR);
+	hook_ota_http_state_value = HOOK_OTA_HTTP_ERROR;
 	return -EIO;
 }
 
@@ -844,7 +413,6 @@ fail:
 
 static char hook_ota_http_url[HOOK_OTA_HTTP_URL_MAX];
 static volatile bool hook_ota_http_requested;
-static volatile uint8_t hook_ota_http_state_value;
 K_SEM_DEFINE(hook_ota_http_signal, 0, 1);
 
 /*
@@ -889,8 +457,7 @@ static void hook_ota_publish_result(uint8_t reason)
 
 	/*
 	 * Publish ONCE, on channel 2 (ai_safety/<dev>/ota/hook/server) - the
-	 * topic that exists for exactly this: OTA progress and results. (The
-	 * Ymodem progress messages go there as well.)
+	 * topic that exists for exactly this: OTA results.
 	 *
 	 * One channel only, on purpose: the module merges serial frames that
 	 * follow each other without a gap (20 ms packet timeout) into ONE MQTT
@@ -917,6 +484,22 @@ static void hook_ota_publish_result(uint8_t reason)
 uint8_t hook_ota_http_status(void)
 {
 	return hook_ota_http_state_value;
+}
+
+const char *hook_ota_http_state_name(uint8_t state)
+{
+	switch (state) {
+	case HOOK_OTA_HTTP_IDLE:
+		return "idle";
+	case HOOK_OTA_HTTP_DOWNLOADING:
+		return "downloading";
+	case HOOK_OTA_HTTP_STAGED:
+		return "staged";
+	case HOOK_OTA_HTTP_ERROR:
+		return "error";
+	default:
+		return "unknown";
+	}
 }
 
 int hook_ota_http_request(const char *url, uint32_t len)
@@ -988,6 +571,7 @@ static void hook_ota_http_run(void)
 {
 	char host[HOOK_OTA_HTTP_HOST_MAX];
 	char path[HOOK_OTA_HTTP_PATH_MAX];
+	bool staged = false;
 	uint16_t port = 80U;
 	uint32_t start;
 	uint8_t fail_reason = 0U;
@@ -1077,11 +661,12 @@ static void hook_ota_http_run(void)
 			start = k_uptime_get_32();
 			while ((uint32_t)(k_uptime_get_32() - start) <
 			       HOOK_OTA_HTTP_MAX_MS) {
-				hook_ota_state_t st = hook_ota_get_state();
 				uint32_t expect = hook_ota_http_expect_bytes();
 
-				if ((st == HOOK_OTA_STAGED) ||
-				    (st == HOOK_OTA_ERROR)) {
+				/* The receiver gave up (write error, short
+				 * write, image not valid). */
+				if (hook_ota_http_state_value ==
+				    HOOK_OTA_HTTP_ERROR) {
 					break;
 				}
 
@@ -1093,7 +678,7 @@ static void hook_ota_http_run(void)
 				    (hook_ota_http_bytes() >= expect)) {
 					LOG_INF("HTTP OTA: body complete (%u B)",
 						hook_ota_http_bytes());
-					(void)hook_ota_http_finish();
+					staged = (hook_ota_http_finish() == 1);
 					break;
 				}
 
@@ -1145,7 +730,7 @@ static void hook_ota_http_run(void)
 	hook_heartbeat_set_suspend(false);
 	hook_health_ota_gate(false);
 
-	if (hook_ota_get_state() == HOOK_OTA_STAGED) {
+	if (staged) {
 		hook_ota_http_state_value = HOOK_OTA_HTTP_STAGED;
 
 		/*
@@ -1174,7 +759,7 @@ static void hook_ota_http_run(void)
 
 	hook_ota_http_state_value = HOOK_OTA_HTTP_ERROR;
 	LOG_ERR("HTTP OTA: failed (state=%s, %u/%u B)",
-		hook_ota_state_name(hook_ota_get_state()),
+		hook_ota_http_state_name(hook_ota_http_state_value),
 		hook_ota_http_bytes(), hook_ota_http_expect_bytes());
 	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_ERR,
 				"HTTP OTA failed (%u/%u B), MQTT restored",
@@ -1204,105 +789,26 @@ static struct k_thread hook_ota_http_thread_obj;
 
 void hook_ota_init(void)
 {
-	hook_ymodem_init(&hook_ota_ymodem_config);
-	hook_ota_state = HOOK_OTA_IDLE;
 	hook_ota_http_state_value = HOOK_OTA_HTTP_IDLE;
 
 	/*
-	 * A download may have finished before this reset, in which case only
-	 * the persisted marker (ota.staged) knows about it - say so, otherwise
-	 * the image in slot1 looks like a leftover nobody asked about.
+	 * Report what slot1 holds: after a download (or a rollback) an image can
+	 * sit there without anything in RAM knowing about it, and the hash is
+	 * what selects it for "craner#AT+OTATEST=<hash>".
 	 */
-	if (hook_ota_staged_pending()) {
-		LOG_WRN("slot1 holds a staged image from an earlier download "
-			"(ota.staged), craner#AT+OTATEST installs it");
-		(void)offline_log_event(
-			OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
-			"slot1 holds a staged image from an earlier download "
-			"(ota.staged), waiting for AT+OTATEST");
-	} else {
-		/*
-		 * Slot1 moved on (a confirmed install, a rollback, a cancelled
-		 * session) or holds nothing: drop the marker so it cannot be
-		 * taken for a ready image later. No store write when it is
-		 * already empty.
-		 */
-		hook_ota_staged_marker_clear();
-	}
-}
-
-int hook_ota_request(void)
-{
-	int ret;
-
-	if (hook_ota_is_active()) {
-		/* The host tool repeats the start command every 10 s: re-arm the
-		 * CRC request instead of restarting the session.
-		 */
-		LOG_INF("OTA already active (%s), re-sending 'C'",
-			hook_ota_state_name(hook_ota_state));
-		return (int)hook_ymodem_send_control(HOOK_YMODEM_CRC_REQUEST);
-	}
-
-	LOG_INF("OTA session requested");
-	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
-				"OTA receiver armed by the host tool");
-	hook_ota_last_progress_bytes = 0U;
-	hook_ota_last_crc_request_ms = 0U;
-	hook_ota_last_activity_ms = k_uptime_get_32();
-	hook_ota_flash_active = false;
-	hook_ota_rx_drops = 0U;
-
-	/* Drop bytes that arrived before the session was armed. */
-	k_msgq_purge(&hook_ota_rx_queue);
-
-	hook_health_ota_gate(true);
-	hook_ota_set_state(HOOK_OTA_WAIT_START);
-
-	ret = hook_ymodem_start_receive();
-	if (ret != HOOK_YMODEM_OK) {
-		LOG_ERR("could not start the Ymodem receiver: %d", ret);
-		hook_health_ota_gate(false);
-		hook_ota_set_state(HOOK_OTA_ERROR);
-		return ret;
-	}
-
-	hook_ota_last_crc_request_ms = k_uptime_get_32();
-
-	return 0;
-}
-
-void hook_ota_cancel(void)
-{
-	/*
-	 * A cancelled session leaves slot1 in an unknown state (it may have
-	 * been written half way), so a previously staged image must not stay
-	 * installable.
-	 */
-	hook_ota_staged_marker_clear();
-
-	if (!hook_ota_is_active()) {
-		LOG_INF("OTA cancel: no session active");
-		hook_ymodem_reset();
-		hook_ota_set_state(HOOK_OTA_IDLE);
-		return;
-	}
-
-	LOG_WRN("OTA cancel requested");
-	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
-				"OTA session cancelled");
-
-	/* Tell a possibly still transmitting host to stop (CAN CAN). */
 	{
-		static const uint8_t cancel[2] = {HOOK_YMODEM_CAN, HOOK_YMODEM_CAN};
+		struct ota_manager_image_info slot1;
 
-		(void)hook_ota_channel_send(cancel, (uint16_t)sizeof(cancel));
+		if ((ota_manager_get_image_info(1U, &slot1) == 0) && slot1.valid) {
+			LOG_INF("slot1 image: v%s %.8s (install with "
+				"craner#AT+OTATEST=%.8s)",
+				slot1.version, slot1.hash_hex, slot1.hash_hex);
+			(void)offline_log_event(
+				OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
+				"slot1 image v%s %.8s, install with AT+OTATEST=%.8s",
+				slot1.version, slot1.hash_hex, slot1.hash_hex);
+		}
 	}
-
-	hook_ymodem_reset();
-	hook_ota_flash_active = false;
-	hook_health_ota_gate(false);
-	hook_ota_set_state(HOOK_OTA_IDLE);
 }
 
 int hook_ota_confirm(void)
@@ -1318,196 +824,62 @@ int hook_ota_confirm(void)
 	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_INF,
 				"running image confirmed by the engineer");
 
-	/*
-	 * The image is installed and accepted: nothing is waiting for a test
-	 * any more. (Whatever slot1 holds now is the previous image - staging
-	 * that one again would be a downgrade.)
-	 */
-	hook_ota_staged_marker_clear();
-
 	return 0;
 }
 
-int hook_ota_test_and_reboot(void)
+/*
+ * Arm the MCUboot test upgrade for one specific image.
+ *
+ * The hash prefix selects it - the same rule as the "image test" shell command
+ * (ota_manager_request_image_test()): the image must be the one in slot1, so
+ * the running image can never be selected, and after a swap the old image that
+ * ended up in slot1 is only installed if its hash is asked for explicitly.
+ * Nothing has to be remembered between the download and the test, which is why
+ * this needs no persisted state and also works after a reset.
+ *
+ * @return 0 when the upgrade is armed, or the negative error of the lookup
+ *         (image not found, ambiguous prefix, or the match is not in slot1).
+ */
+int hook_ota_arm_test(const char *hash_prefix)
 {
-	bool staged_earlier = false;
 	int ret;
 
-	if (!hook_ota_test_available()) {
-		/* Drop a marker that no longer describes slot1. */
-		hook_ota_staged_marker_clear();
-		LOG_WRN("OTA test requested but no image is staged (state=%s)",
-			hook_ota_state_name(hook_ota_state));
+	if ((hash_prefix == NULL) || (hash_prefix[0] == '\0')) {
 		return -EINVAL;
 	}
 
-	/*
-	 * The image may have been downloaded before the last reset: then only
-	 * the persisted marker knows about it (see ota.staged).
-	 */
-	staged_earlier = (hook_ota_state != HOOK_OTA_STAGED) &&
-			 (hook_ota_http_status() != HOOK_OTA_HTTP_STAGED);
-	if (staged_earlier) {
-		LOG_WRN("OTA test requested for the image staged before the "
-			"last reset (ota.staged)");
+	ret = ota_manager_request_image_test(hash_prefix);
+	if (ret != 0) {
+		LOG_WRN("OTA test rejected for image %s: %d", hash_prefix, ret);
 		(void)offline_log_event(
 			OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
-			"OTA test requested for an image staged before the last reset");
+			"OTA test rejected for image %s (%d)", hash_prefix, ret);
+		return ret;
 	}
-
-	/*
-	 * Arm the test upgrade: MCUboot swaps slot0/slot1 on the next reset and
-	 * rolls back if the new image is not confirmed within the window of
-	 * ota_manager_service.
-	 */
-	ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
-	if (ret != 0) {
-		LOG_ERR("boot_request_upgrade failed: %d", ret);
-		return -EIO;
-	}
-
-	LOG_WRN("OTA test requested: rebooting in %u ms for MCUboot",
-		(unsigned int)CONFIG_HOOK_OTA_REBOOT_DELAY_MS);
-	(void)offline_log_event(OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
-				"OTA test requested, rebooting into the MCUboot test image");
-
-	k_msleep(CONFIG_HOOK_OTA_REBOOT_DELAY_MS);
-	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
 }
 
-void hook_ota_feed(const uint8_t *data, uint16_t len)
-{
-	struct hook_ota_rx_block block;
-	uint16_t offset = 0U;
-
-	if ((data == NULL) || (len == 0U)) {
-		return;
-	}
-
-	/* Split a frame of up to 2 KiB into queue blocks. */
-	while (offset < len) {
-		uint16_t chunk = (uint16_t)(len - offset);
-
-		if (chunk > HOOK_OTA_RX_BLOCK_SIZE) {
-			chunk = HOOK_OTA_RX_BLOCK_SIZE;
-		}
-
-		block.len = chunk;
-		memcpy(block.data, &data[offset], chunk);
-
-		if (k_msgq_put(&hook_ota_rx_queue, &block, K_NO_WAIT) != 0) {
-			hook_ota_rx_drops++;
-		}
-
-		offset = (uint16_t)(offset + chunk);
-	}
-}
-
 /*
- * The host tool waits for the receiver to ask for data. Re-arm the CRC
- * request periodically while the receiver has no complete packet, otherwise
- * the tool stalls on every "waiting for 'C'" step until its 30 s timeout.
+ * Announce the test, give the answer time to leave the device and reboot:
+ * MCUboot swaps slot0/slot1 on the next reset and rolls back unless the new
+ * image is confirmed within the window of ota_manager_service.
+ *
+ * Never returns.
  */
-static void hook_ota_keepalive_c(void)
+void hook_ota_reboot_for_test(const char *hash_prefix)
 {
-	uint32_t now = k_uptime_get_32();
+	LOG_WRN("OTA test requested for image %s: rebooting in %u ms for MCUboot",
+		hash_prefix,
+		(unsigned int)CONFIG_HOOK_OTA_REBOOT_DELAY_MS);
+	(void)offline_log_event(
+		OFFLINE_LOG_CAT_OTA, OFFLINE_LOG_LEVEL_WRN,
+		"OTA test requested for image %s, rebooting into the MCUboot test image",
+		hash_prefix);
 
-	if (!hook_ota_is_active()) {
-		return;
-	}
-
-	/* Never drive the Ymodem 'C' handshake into an HTTP download: the
-	 * module would append it to the HTTP request under construction.
-	 */
-	if (hook_ota_http_status() == HOOK_OTA_HTTP_DOWNLOADING) {
-		return;
-	}
-
-	if ((now - hook_ota_last_crc_request_ms) <
-	    CONFIG_HOOK_OTA_CRC_REQUEST_INTERVAL_MS) {
-		return;
-	}
-
-	hook_ota_last_crc_request_ms = now;
-
-	if (hook_ymodem_waiting_for_packet()) {
-		(void)hook_ymodem_send_control(HOOK_YMODEM_CRC_REQUEST);
-	}
+	k_msleep(CONFIG_HOOK_OTA_REBOOT_DELAY_MS);
+	sys_reboot(SYS_REBOOT_COLD);
 }
-
-static void hook_ota_session_timeout_check(void)
-{
-	if (!hook_ota_is_active()) {
-		return;
-	}
-
-	/*
-	 * The HTTP download shares hook_ota_state with the Ymodem session, but
-	 * not the activity stamp: hook_ota_last_activity_ms is only written by
-	 * the Ymodem path, so once the controller has been up for
-	 * CONFIG_HOOK_OTA_SESSION_TIMEOUT_MS this check aborts every HTTP
-	 * download a moment after it enters HOOK_OTA_RECEIVING (observed
-	 * 2026-09-24, 29 minutes of uptime: "OTA session timeout (600000 ms
-	 * without data), aborting" 2.5 s after slot1 was opened). The HTTP
-	 * session has its own timeouts, see hook_ota_http_run().
-	 */
-	if (hook_ota_http_status() == HOOK_OTA_HTTP_DOWNLOADING) {
-		return;
-	}
-
-	if ((k_uptime_get_32() - hook_ota_last_activity_ms) <
-	    CONFIG_HOOK_OTA_SESSION_TIMEOUT_MS) {
-		return;
-	}
-
-	LOG_ERR("OTA session timeout (%u ms without data), aborting",
-		(unsigned int)CONFIG_HOOK_OTA_SESSION_TIMEOUT_MS);
-	hook_ota_report("ERROR,22");
-	hook_ota_cancel();
-}
-
-/*
- * There is deliberately no automatic reboot when an image is staged: the
- * Ymodem and the HTTP download share hook_ota_state, and the old helper that
- * rebooted on HOOK_OTA_STAGED fired the instant the HTTP body was complete -
- * before the module had been switched back to MQTT. The reboot now happens
- * only when the test upgrade is asked for explicitly (AT+OTATEST ->
- * hook_ota_test_and_reboot()), so the device stays reachable in between.
- */
-static void hook_ota_thread(void *a, void *b, void *c)
-{
-	(void)a;
-	(void)b;
-	(void)c;
-
-	for (;;) {
-		struct hook_ota_rx_block block;
-
-		if (k_msgq_get(&hook_ota_rx_queue, &block, K_MSEC(5)) == 0) {
-			hook_ota_last_activity_ms = k_uptime_get_32();
-
-			for (uint16_t i = 0U; i < block.len; i++) {
-				hook_ymodem_input_byte(block.data[i]);
-			}
-		}
-
-		(void)hook_ymodem_tick(k_uptime_get_32());
-		hook_ota_keepalive_c();
-		hook_ota_session_timeout_check();
-
-		if ((hook_ota_rx_drops != 0U) && ((hook_ota_rx_drops % 32U) == 0U)) {
-			LOG_WRN("OTA receive queue overflow (%u blocks dropped)",
-				hook_ota_rx_drops);
-		}
-
-		k_msleep(HOOK_OTA_THREAD_PERIOD_MS);
-	}
-}
-
-K_THREAD_STACK_DEFINE(hook_ota_stack, 4096);
-static struct k_thread hook_ota_thread_obj;
 
 void hook_ota_start(void)
 {
@@ -1516,10 +888,4 @@ void hook_ota_start(void)
 			hook_ota_http_thread, NULL, NULL, NULL,
 			OSAL_PRIO_BELOW_NORMAL, 0, K_NO_WAIT);
 	k_thread_name_set(&hook_ota_http_thread_obj, "OtaHttp");
-
-	k_thread_create(&hook_ota_thread_obj, hook_ota_stack,
-			K_THREAD_STACK_SIZEOF(hook_ota_stack),
-			hook_ota_thread, NULL, NULL, NULL,
-			OSAL_PRIO_NORMAL, 0, K_NO_WAIT);
-	k_thread_name_set(&hook_ota_thread_obj, "OtaTask");
 }

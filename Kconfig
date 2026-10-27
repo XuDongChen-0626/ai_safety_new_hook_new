@@ -109,55 +109,25 @@ config HOOK_POWER_OFF_TIME_HHMM
 	  0x1500 = 21:00 (same default as the old firmware).
 
 config HOOK_OTA_ENABLE
-	bool "MQTT + Ymodem OTA into the MCUboot secondary slot"
+	bool "HTTP OTA into the MCUboot secondary slot"
 	default y
 	select IMG_MANAGER
 	help
-	  Receive a firmware image from the cloud/host tool over the usr.cn "2,"
-	  channel with Ymodem, stream it into the MCUboot slot1 partition and
-	  arm a test upgrade (boot_request_upgrade). MCUboot validates the
+	  Let the cloud trigger "craner#AT+OTADL=<url>": the 4G module switches
+	  to HTTPD, downloads the image itself, the controller streams it into
+	  the MCUboot slot1 partition and verifies it. "craner#AT+OTATEST" then
+	  arms a test upgrade (boot_request_upgrade); MCUboot validates the
 	  signature, swaps the slots and rolls back unless the new image is
-	  confirmed (AT+OTALOCK, "hook ota confirm" or the auto-confirm timer).
-
-config HOOK_OTA_PACKET_TIMEOUT_MS
-	int "Ymodem per-packet timeout in milliseconds"
-	default 30000
-	range 1000 300000
-	depends on HOOK_OTA_ENABLE
-	help
-	  Time without a completed packet before the receiver NAKs and, after
-	  HOOK_OTA_MAX_ERRORS retries, aborts the transfer. Keep it above the
-	  worst case flash sector erase time (~4 s) plus link latency.
-
-config HOOK_OTA_MAX_ERRORS
-	int "Maximum consecutive Ymodem errors"
-	default 10
-	range 1 100
-	depends on HOOK_OTA_ENABLE
-
-config HOOK_OTA_CRC_REQUEST_INTERVAL_MS
-	int "Interval of the Ymodem 'C' keepalive in milliseconds"
-	default 1000
-	range 100 60000
-	depends on HOOK_OTA_ENABLE
-	help
-	  The host tool waits for 'C' before block 0 and again before the data
-	  blocks, so the receiver re-sends 'C' while it has no complete packet.
-
-config HOOK_OTA_SESSION_TIMEOUT_MS
-	int "OTA session inactivity timeout in milliseconds"
-	default 600000
-	range 10000 3600000
-	depends on HOOK_OTA_ENABLE
+	  confirmed ("craner#AT+OTA_CONFIRM").
 
 config HOOK_OTA_REBOOT_DELAY_MS
-	int "Delay between staging the image and rebooting in milliseconds"
+	int "Delay between arming the test upgrade and rebooting in milliseconds"
 	default 2000
 	range 0 60000
 	depends on HOOK_OTA_ENABLE
 	help
-	  Time for the 'DONE' progress message to reach the cloud before the
-	  device resets so that MCUboot can install slot1.
+	  Time for the "craner#OK" of AT+OTATEST (and the offline log entry) to
+	  get out before the device resets into the MCUboot test image.
 
 
 endmenu

@@ -17,9 +17,10 @@
 LOG_MODULE_REGISTER(hook_uart, CONFIG_LOG_DEFAULT_LEVEL);
 
 /*
- * The 4G channel carries whole Ymodem packets (up to 1 KiB data + header)
- * inside a single usr.cn message, so its receive buffer has to hold the
- * complete frame; the old bootloader used 2048 B for the same link.
+ * The 4G channel delivers one usr.cn message per frame, including the OTA
+ * response body chunks the module streams during an HTTP firmware download,
+ * so its receive buffer has to hold the complete frame (the link is idle
+ * framed, see the module side RSTIM setting).
  */
 #define HOOK_UART_RECV_BUFFER_SIZE  256U
 #define HOOK_MODEM_RECV_BUFFER_SIZE 2048U

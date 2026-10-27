@@ -68,8 +68,9 @@ void hook_health_alarm_supply_restored(void);
 
 /*
  * Suspend/resume the task check-in supervision. Used by the OTA service:
- * flash sector erase and the Ymodem transfer can keep a business thread busy
- * for longer than the check-in window, which must not trip the watchdog.
+ * a flash sector erase during an HTTP firmware download can keep the 4G
+ * thread busy for longer than the check-in window, which must not trip the
+ * watchdog.
  */
 void hook_health_ota_gate(bool active);
 
