@@ -282,10 +282,10 @@ void hook_health_alarm_supply_restored(void)
 	sys_health_event_enable(HOOK_HEALTH_EVENT_ALARM);
 	hook_reg_clear_error_bits(ERR_LED_OFFLINE);
 
-	LOG_INF("alarm module supervision resumed (host heartbeat back)");
+	LOG_INF("alarm module supervision resumed (supply restored)");
 	(void)offline_log_event(
 		OFFLINE_LOG_CAT_ALARM, OFFLINE_LOG_LEVEL_INF,
-		"alarm module supervision resumed, host heartbeat back");
+		"alarm module supervision resumed, supply restored");
 }
 
 void hook_health_ota_gate(bool active)

@@ -58,10 +58,23 @@ void hook_heartbeat_clear_link_stats(void);
  */
 #if defined(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE)
 void hook_heartbeat_set_suspend(bool suspended);
+
+/*
+ * The power schedule re-powers the alarm rail when the controller leaves soft
+ * standby (hook_rtc_sleep_leave()). Tell the supervision, otherwise its
+ * internal "alarm power on" flag stays false - the 60 s timeout action (cut
+ * the supply, suspend the alarm polling) would be skipped until the next
+ * heartbeat arrives.
+ */
+void hook_heartbeat_alarm_power_restored(void);
 #else
 static inline void hook_heartbeat_set_suspend(bool suspended)
 {
 	(void)suspended;
+}
+
+static inline void hook_heartbeat_alarm_power_restored(void)
+{
 }
 #endif
 

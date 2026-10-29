@@ -24,7 +24,9 @@
 #include <zephyr/sys/timeutil.h>
 
 #include "board.h"
+#include "hook_alarm.h"
 #include "hook_health.h"
+#include "hook_heartbeat.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "offline_log_service.h"
@@ -449,6 +451,13 @@ static void hook_rtc_sleep_enter(void)
 	hook_reg_set(CMD_BUZZER_3M, 0U);
 	hook_reg_input_set(STATUS_LED_SWITCH, 0U);
 	hook_reg_input_set(STATUS_BUZZER, 0U);
+#if defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
+	/*
+	 * The rail is about to disappear: stop polling the module and forget the
+	 * state it acknowledged, so the first exchange after wake re-sends it.
+	 */
+	hook_alarm_set_suspend(true);
+#endif
 	GPIO_WRITE(alarm_power_en_gpio, 0);
 	GPIO_WRITE(pwr_led_gpio, 0);
 
@@ -466,6 +475,19 @@ static void hook_rtc_sleep_leave(void)
 	is_soft_standby = 0U;
 
 	GPIO_WRITE(alarm_power_en_gpio, 1);
+	/*
+	 * Put the heartbeat/alarm bookkeeping back in sync with the rail that was
+	 * just re-powered, then let the alarm module boot before polling it.
+	 * Without this the heartbeat timeout action stayed suppressed after a
+	 * standby wake-up and the alarm thread hammered an unpowered/absent
+	 * module at every pass.
+	 */
+#if defined(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE)
+	hook_heartbeat_alarm_power_restored();
+#endif
+#if defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
+	hook_alarm_set_suspend(false);
+#endif
 	/* PWD_LED is re-driven by app/hook_alarm (it mirrors the Modbus
 	 * flash-light command register).
 	 */

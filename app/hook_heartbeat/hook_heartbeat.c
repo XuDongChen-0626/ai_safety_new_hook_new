@@ -202,6 +202,32 @@ static void hook_heartbeat_set_alarm_power(bool on)
 	hook_heartbeat_alarm_power_on = on;
 }
 
+void hook_heartbeat_alarm_power_restored(void)
+{
+	/*
+	 * The RTC power schedule drives the rail directly when leaving soft
+	 * standby, so the supervision state has to be brought back in sync.
+	 * Without this the flag stayed false (it is cleared in the standby
+	 * branch) and the 60 s timeout action was skipped after every standby
+	 * wake-up until a heartbeat arrived.
+	 */
+	hook_heartbeat_set_alarm_power(true);
+
+	/* Fresh timeout window: a silent host must cut the rail again. */
+	hook_heartbeat_last_counter_ms = hook_get_time_ms();
+	hook_heartbeat_last_counter = hook_reg_get(CMD_HOST_HEARTBEAT);
+
+	/*
+	 * The rail was off during standby, so a supply cut caused by an earlier
+	 * timeout is gone with the power cycle: resume the supervision state
+	 * (the host heartbeat event keeps its own 65 s window and reports
+	 * offline again if the host stays silent).
+	 */
+#if defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
+	hook_health_alarm_supply_restored();
+#endif
+}
+
 void hook_heartbeat_init(void)
 {
 	hook_heartbeat_set_alarm_power(true);
