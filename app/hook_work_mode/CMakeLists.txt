@@ -1,3 +1,3 @@
 target_sources(app PRIVATE
-	hook_supervisor.c
+	hook_work_mode.c
 )

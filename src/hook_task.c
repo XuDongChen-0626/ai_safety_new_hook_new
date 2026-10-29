@@ -16,7 +16,7 @@
 #include "hook_ota.h"
 #include "hook_heartbeat.h"
 #include "hook_rtc.h"
-#include "hook_supervisor.h"
+#include "hook_work_mode.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
 
@@ -59,7 +59,7 @@ void init_app_hook_task(void)
 	hook_ota_init();
 	hook_ota_start();
 #endif
-	hook_supervisor_start();
+	hook_work_mode_start();
 	hook_health_task_start();
 
 	LOG_INF("[HOOK] application threads started");

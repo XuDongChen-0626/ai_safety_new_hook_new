@@ -52,7 +52,7 @@
 | `application/gps_app.c` 的 RTC 定时开关机 / 待机部分 | `app/hook_rtc/`（GPS/NMEA 已随本产品取消） |
 | `application/modbus_rtu_server_interface.c` 的寄存器表 | `app/hook_modbus/hook_register.c`（`module/modbus_data_model` 表） |
 | `application/app_4g.c` + `at_protocol_handler.c` + `uart_manage_handler.c` | `app/hook_4g/`（`hook_cloud_proto.c` + `hook_at.c` + `hook_4g.c`） |
-| `application/app_sys_supervisor.c`（心跳灯动画 / 工作模式） | `app/hook_supervisor/` |
+| `application/app_sys_supervisor.c`（心跳灯动画 / 工作模式） | 心跳灯 → `system_health_service` 的 LED backend；工作模式 → `app/hook_work_mode/` |
 | `application/app_4g.c` 中的错误码 / 看门狗打点（旧代码已注释） | `app/hook_health/` + `module/system_health_service`（IWDG 喂狗与任务打卡） |
 | 自定义双 Bank OTA（`ota_flash_service.c` + `craner#AT+OTABOOT/OTALOCK`） | MCUboot（sysbuild, swap-using-move）+ HTTP 下载（`craner#AT+OTADL`）+ `module/ota_manager_service`（MCUmgr over shell 仍可用于本机调试） |
 | `printf_redirect` / LOGD/LOGI/LOGE 宏 | Zephyr logging（`LOG_MODULE_REGISTER`，日志经 shell 输出） |
@@ -84,9 +84,14 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 | `BmsMaster` | `app/hook_bms` | 100 ms（500 ms / 10 s 轮询） | 3 |
 | `TaskModbusSlave` / `TaskModbusMaster` | `component/am_modbus` | 事件驱动 | 3 |
 | `RtcPwrSched` | `app/hook_rtc` | 1 s（校准/时间发布；调度检查 5 s） | 4 |
-| `SysSupervisor` / `WorkModeTask` | `app/hook_supervisor` | 200 ms / 100 ms | 5 |
+| `WorkModeTask` | `app/hook_work_mode` | 100 ms（聚合工作模式到输入寄存器 106） | 5 |
 | `HookHealth` | `app/hook_health` | 1 s | 6 |
 | `OtaHttp` | `app/hook_ota` | 事件驱动（HTTP 下载编排：切 HTTPD、写 slot1、切回 MQTT） | 4 |
+
+心跳灯 `heartbeat_led`(PD10) 不再有独立线程：由 `system_health_service` 的 100 ms
+周期回调驱动（`CONFIG_SYS_HEALTH_LED_INDICATOR_BACKEND=y`）——
+正常 1 s 亮 / 1 s 灭；离线事件按优先级闪烁（心跳=1、声光=2、BMS=3，
+每次 200 ms、间隔 200 ms、一轮后灭 2 s）；开机自检关闭。
 
 ## 编译 / 烧录 / OTA
 
@@ -218,7 +223,7 @@ craner#AT+SYSRESET   -> 冷复位
 
 ```text
 app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_heartbeat /
-            hook_rtc / hook_4g / hook_ota / hook_supervisor / hook_health /
+            hook_rtc / hook_4g / hook_ota / hook_work_mode / hook_health /
             hook_params）
 boards/     自定义板级定义 craner_hook_stm32h743vit6
 component/  可移植组件（uart_manage / am_modbus 从机寄存器回调 /

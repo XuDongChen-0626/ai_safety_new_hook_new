@@ -137,7 +137,13 @@ static const struct sys_health_event hook_health_events[] = {
 		.event = HOOK_HEALTH_EVENT_TASK_ALIVE,
 		.name = "task_alive",
 		.enable = true,
-		.priority = 1U,
+		/*
+		 * Display-only priority (the LED backend blinks this many times
+		 * and shows the smallest number when several events are
+		 * offline). A task that stops checking in is rebooted by the
+		 * watchdog, it is not a field-device fault, so it goes last.
+		 */
+		.priority = 4U,
 		.offline_timeout_ms = HOOK_HEALTH_TASK_TIMEOUT_MS,
 		.action_mask = SYS_HEALTH_ACTION_LOG |
 			       SYS_HEALTH_ACTION_SET_DEGRADED |
@@ -158,7 +164,8 @@ static const struct sys_health_event hook_health_events[] = {
 		.event = HOOK_HEALTH_EVENT_ALARM,
 		.name = "alarm_module",
 		.enable = IS_ENABLED(CONFIG_HOOK_ALARM_MODULE_ENABLE),
-		.priority = 3U,
+		/* 2 blinks, as the old hook_supervisor LED showed. */
+		.priority = 2U,
 		.offline_timeout_ms = HOOK_HEALTH_ALARM_TIMEOUT_MS,
 		.action_mask = SYS_HEALTH_ACTION_LOG,
 		.offline_first_func = hook_health_offline_first,
@@ -168,7 +175,8 @@ static const struct sys_health_event hook_health_events[] = {
 		.event = HOOK_HEALTH_EVENT_HOST_HEARTBEAT,
 		.name = "host_heartbeat",
 		.enable = IS_ENABLED(CONFIG_HOOK_HOST_HEARTBEAT_ENABLE),
-		.priority = 2U,
+		/* 1 blink: the root cause that also cuts the alarm supply. */
+		.priority = 1U,
 		.offline_timeout_ms = HOOK_HEALTH_HOST_TIMEOUT_MS,
 		.action_mask = SYS_HEALTH_ACTION_LOG,
 		.offline_first_func = hook_health_offline_first,
