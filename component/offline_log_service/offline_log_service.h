@@ -87,6 +87,8 @@ void offline_log_transition(enum offline_log_category cat,
 int offline_log_sync(void);
 
 struct offline_log_status {
+	bool disabled;          /* backend disabled after bounded mount failures */
+	int last_mount_error;   /* most recent SD mount/remount error */
 	bool card_mounted;      /* SD card is mounted */
 	bool file_open;         /* a log file is open */
 	bool time_trusted;      /* trusted UTC time is available */

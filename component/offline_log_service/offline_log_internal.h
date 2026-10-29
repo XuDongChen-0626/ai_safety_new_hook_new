@@ -15,6 +15,9 @@ extern "C" {
 /** Start the mount/writer thread and mark the service initialized. */
 int offline_log_sd_start(void);
 
+/** False after the SD backend exhausted its bounded mount attempts. */
+bool offline_log_sd_is_enabled(void);
+
 /** Queue one already-formatted message body (writer thread owns the SD). */
 int offline_log_sd_enqueue(enum offline_log_category cat,
 			   enum offline_log_level level,

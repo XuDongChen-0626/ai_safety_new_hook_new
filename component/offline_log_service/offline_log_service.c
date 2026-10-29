@@ -33,6 +33,7 @@
 #endif
 
 #include <stdarg.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -143,6 +144,9 @@ int offline_log_event(enum offline_log_category cat,
 
 	if (fmt == NULL) {
 		return -EINVAL;
+	}
+	if (!offline_log_sd_is_enabled()) {
+		return -ENODEV;
 	}
 
 	va_start(ap, fmt);

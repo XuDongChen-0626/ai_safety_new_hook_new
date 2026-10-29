@@ -173,8 +173,20 @@ config OFFLINE_LOG_MOUNT_RETRY_MS
 	range 250 60000
 	depends on OFFLINE_LOG_SERVICE
 	help
-	  Interval between mount attempts while the SD card is missing or not
-	  formatted.
+	  Interval between bounded mount attempts while the SD card is missing
+	  or not formatted.
+
+config OFFLINE_LOG_MOUNT_MAX_ATTEMPTS
+	int "Maximum SD card mount attempts"
+	default 3
+	range 1 3
+	depends on OFFLINE_LOG_SERVICE
+	help
+	  Maximum number of mount attempts after boot or after media loss.
+	  The initial attempt counts toward this limit. When every attempt
+	  fails, the SD backend is disabled until the next device reboot so a
+	  missing or damaged card cannot hold the writer in a permanent retry
+	  loop.
 
 config OFFLINE_LOG_SHELL
 	bool "Offline log shell commands"

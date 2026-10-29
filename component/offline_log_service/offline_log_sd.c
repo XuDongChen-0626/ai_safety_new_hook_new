@@ -30,6 +30,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/linker/section_tags.h>
 #include <zephyr/storage/disk_access.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <zephyr/app_version.h>
@@ -74,6 +75,9 @@ LOG_MODULE_REGISTER(offline_log_sd, CONFIG_LOG_DEFAULT_LEVEL);
 #define OL_CLEANUP_MAX_DIRS CONFIG_OFFLINE_LOG_CLEANUP_MAX_DIRS
 #define OL_CLEANUP_INTERVAL_S 3600U
 #define OL_SPACE_CHECK_INTERVAL_S 300U
+#define OL_MOUNT_MAX_ATTEMPTS CONFIG_OFFLINE_LOG_MOUNT_MAX_ATTEMPTS
+#define OL_DISK_RESET_SETTLE_MS 100U
+#define OL_CARD_SETTLE_MS 1000U
 
 /* File name prefix, e.g. "car_flat" / "car_luffing". */
 #define OL_FILE_PREFIX CONFIG_OFFLINE_LOG_FILE_PREFIX
@@ -99,6 +103,13 @@ FS_FSTAB_DECLARE_ENTRY(DT_NODELABEL(sd_mp));
 static struct fs_mount_t *sd_mount = &FS_FSTAB_ENTRY(DT_NODELABEL(sd_mp));
 
 static bool card_mounted;
+/*
+ * Set after the bounded mount-retry sequence is exhausted. Once disabled,
+ * callers stop formatting/queueing events and the writer sleeps until reboot;
+ * a missing or damaged card therefore cannot create a permanent 5 s retry loop.
+ */
+static atomic_t sd_disabled;
+static int last_mount_error;
 static bool file_open;
 static bool pending_mode;    /* current file is under /olog/pending/ */
 static bool time_trusted;
@@ -697,6 +708,9 @@ int offline_log_sd_hold_open_file_for_read(const char *path)
 
 	if (path == NULL) {
 		return -EINVAL;
+	}
+	if (!offline_log_sd_is_enabled()) {
+		return -ENODEV;
 	}
 
 	k_mutex_lock(&sd_lock, K_FOREVER);
@@ -1323,7 +1337,67 @@ static void maintenance_locked(void)
 /* mount / writer thread                                               */
 /* ------------------------------------------------------------------ */
 
-static int try_mount(void)
+bool offline_log_sd_is_enabled(void)
+{
+	return atomic_get(&sd_disabled) == 0;
+}
+
+/*
+ * Return the driver and HAL to a clean state before another mount attempt.
+ * A failed HAL_SD_Init() is not a complete deinitialization, so retrying
+ * disk_access_init() directly can keep the controller stuck in its failed
+ * power-on state. Force deinit also handles a disk that was initialized but
+ * whose filesystem mount failed.
+ */
+static void reset_disk_locked(void)
+{
+	bool force = true;
+	int rc;
+
+	close_log_file();
+	sd_hold_for_download = false;
+	hold_reopen_valid = false;
+
+	if (card_mounted) {
+		rc = fs_unmount(sd_mount);
+		if (rc != 0) {
+			LOG_WRN("olog: SD unmount during reset failed: %d", rc);
+		}
+	}
+	card_mounted = false;
+
+	rc = disk_access_ioctl(CONFIG_OFFLINE_LOG_DISK_NAME,
+			       DISK_IOCTL_CTRL_DEINIT, &force);
+	if (rc != 0) {
+		LOG_DBG("olog: SD force deinit returned %d", rc);
+	}
+	k_sleep(K_MSEC(OL_DISK_RESET_SETTLE_MS));
+}
+
+static void disable_backend_locked(int last_error)
+{
+	uint32_t pending = k_msgq_num_used_get(&ol_msgq);
+
+	atomic_set(&sd_disabled, 1);
+	last_mount_error = last_error;
+	close_log_file();
+	card_mounted = false;
+	sd_hold_for_download = false;
+	hold_reopen_valid = false;
+	parked_rec_valid = false;
+
+	if (pending != 0U) {
+		dropped_records += pending;
+		k_msgq_purge(&ol_msgq);
+	}
+
+	LOG_ERR("olog: offline log disabled after %u mount attempts "
+		"(last error %d, dropped %u queued record(s))",
+		(unsigned int)OL_MOUNT_MAX_ATTEMPTS, last_error,
+		pending);
+}
+
+static int try_mount_once(void)
 {
 	struct fs_statvfs stats;
 	int rc;
@@ -1332,14 +1406,20 @@ static int try_mount(void)
 	if (rc != 0) {
 		return rc;
 	}
+
+	/* Give a card inserted after power-on time to finish its internal
+	 * power-on reset and mechanical-contact settling before FATFS reads
+	 * the volume.
+	 */
+	k_sleep(K_MSEC(OL_CARD_SETTLE_MS));
+
 	rc = fs_mount(sd_mount);
 	if (rc == -EBUSY) {
 		/*
-		 * The file system is still mounted from an earlier attempt: a
-		 * write failure only marks the card as unusable (card_mounted =
-		 * false) without unmounting it, and mounting again then fails
-		 * forever with "file system already mounted!!". Drop the old
-		 * mount and retry once.
+		 * Defensive recovery for a stale FATFS mount. The normal reset
+		 * path unmounts successfully, but if the mounted-state flag and
+		 * the filesystem registry ever disagree, do not let every later
+		 * attempt fail permanently with "file system already mounted".
 		 */
 		(void)fs_unmount(sd_mount);
 		rc = fs_mount(sd_mount);
@@ -1356,9 +1436,38 @@ static int try_mount(void)
 	rc = ensure_dirs();
 	if (rc != 0) {
 		LOG_ERR("olog: prepare dirs failed: %d", rc);
+		(void)fs_unmount(sd_mount);
+		card_mounted = false;
+		return rc;
 	}
+	last_mount_error = 0;
 	LOG_INF("olog: SD card mounted at %s", sd_mount->mnt_point);
 	return 0;
+}
+
+static int mount_with_bounded_retries(void)
+{
+	int rc = -ENODEV;
+
+	for (uint32_t attempt = 1U; attempt <= OL_MOUNT_MAX_ATTEMPTS;
+	     attempt++) {
+		rc = try_mount_once();
+		if (rc == 0) {
+			return 0;
+		}
+
+		last_mount_error = rc;
+		LOG_WRN("olog: SD mount attempt %u/%u failed: %d",
+			attempt, (unsigned int)OL_MOUNT_MAX_ATTEMPTS, rc);
+		reset_disk_locked();
+
+		if (attempt < OL_MOUNT_MAX_ATTEMPTS) {
+			k_sleep(K_MSEC(CONFIG_OFFLINE_LOG_MOUNT_RETRY_MS));
+		}
+	}
+
+	disable_backend_locked(rc);
+	return rc;
 }
 
 K_THREAD_STACK_DEFINE(ol_writer_stack, CONFIG_OFFLINE_LOG_WRITER_STACK_SIZE);
@@ -1374,12 +1483,15 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 		struct offline_log_record rec;
 		int rc;
 
+		if (!offline_log_sd_is_enabled()) {
+			k_sleep(K_FOREVER);
+		}
+
 		if (!card_mounted) {
 			k_mutex_lock(&sd_lock, K_FOREVER);
-			rc = try_mount();
+			rc = mount_with_bounded_retries();
 			k_mutex_unlock(&sd_lock);
 			if (rc != 0) {
-				k_sleep(K_MSEC(CONFIG_OFFLINE_LOG_MOUNT_RETRY_MS));
 				continue;
 			}
 		}
@@ -1397,8 +1509,8 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 		maintenance_locked();
 		if (card_mounted &&
 		    disk_access_status(CONFIG_OFFLINE_LOG_DISK_NAME) != 0) {
-			close_log_file();
-			card_mounted = false;
+			LOG_WRN("olog: SD media/controller error, remounting");
+			reset_disk_locked();
 			k_mutex_unlock(&sd_lock);
 			continue;
 		}
@@ -1410,9 +1522,7 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 			parked_rec_valid = false;
 			if (write_record_locked(&rec) != 0) {
 				LOG_ERR("olog: write failed, card may be gone");
-				close_log_file();
-				(void)fs_unmount(sd_mount);
-				card_mounted = false;
+				reset_disk_locked();
 			}
 			k_mutex_unlock(&sd_lock);
 			continue;
@@ -1435,9 +1545,7 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 		}
 		if (write_record_locked(&rec) != 0) {
 			LOG_ERR("olog: write failed, card may be gone");
-			close_log_file();
-			(void)fs_unmount(sd_mount);
-			card_mounted = false;
+			reset_disk_locked();
 		}
 		k_mutex_unlock(&sd_lock);
 	}
@@ -1445,6 +1553,8 @@ static void ol_writer_fn(void *p1, void *p2, void *p3)
 
 int offline_log_sd_start(void)
 {
+	atomic_clear(&sd_disabled);
+	last_mount_error = 0;
 #if defined(CONFIG_TIME_MANAGER_SERVICE)
 	time_trusted = time_manager_has_trusted_time();
 #endif
@@ -1468,6 +1578,9 @@ int offline_log_sd_enqueue(enum offline_log_category cat,
 	if (text == NULL) {
 		return -EINVAL;
 	}
+	if (!offline_log_sd_is_enabled()) {
+		return -ENODEV;
+	}
 	rec.level = (uint8_t)level;
 	rec.category = (uint8_t)cat;
 	(void)snprintf(rec.text, sizeof(rec.text), "%s", text);
@@ -1489,12 +1602,19 @@ int offline_log_sd_sync(void)
 	struct offline_log_record rec;
 	int rc = 0;
 
+	if (!offline_log_sd_is_enabled()) {
+		return -ENODEV;
+	}
+
 	/* If a remote download currently holds the writer file closed, wait
 	 * for the transfer to finish (MCUmgr also auto-closes idle transfers)
 	 * so the queued records can be flushed to SD. */
 	for (;;) {
 		bool hold;
 
+		if (!offline_log_sd_is_enabled()) {
+			return -ENODEV;
+		}
 		k_mutex_lock(&sd_lock, K_FOREVER);
 		hold = sd_hold_for_download;
 		k_mutex_unlock(&sd_lock);
@@ -1505,6 +1625,10 @@ int offline_log_sd_sync(void)
 	}
 
 	k_mutex_lock(&sd_lock, K_FOREVER);
+	if (!card_mounted) {
+		k_mutex_unlock(&sd_lock);
+		return -ENODEV;
+	}
 	while (k_msgq_get(&ol_msgq, &rec, K_NO_WAIT) == 0) {
 		rc = write_record_locked(&rec);
 		if (rc != 0) {
@@ -1532,6 +1656,8 @@ void offline_log_sd_get_status(struct offline_log_status *out)
 		return;
 	}
 	k_mutex_lock(&sd_lock, K_FOREVER);
+	out->disabled = !offline_log_sd_is_enabled();
+	out->last_mount_error = last_mount_error;
 	out->card_mounted = card_mounted;
 	out->file_open = file_open;
 	out->time_trusted = time_trusted;

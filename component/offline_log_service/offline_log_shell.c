@@ -20,9 +20,10 @@ static int cmd_status(const struct shell *shell, size_t argc, char **argv)
 
 	offline_log_get_status(&st);
 	shell_print(shell,
-		    "card_mounted=%d file_open=%d time_trusted=%d",
-		    (int)st.card_mounted, (int)st.file_open,
+		    "disabled=%d card_mounted=%d file_open=%d time_trusted=%d",
+		    (int)st.disabled, (int)st.card_mounted, (int)st.file_open,
 		    (int)st.time_trusted);
+	shell_print(shell, "last_mount_error=%d", st.last_mount_error);
 	shell_print(shell,
 		    "queue=%u/%u dropped=%u bytes=%llu files_removed=%u "
 		    "pending_files_removed=%u",
@@ -89,11 +90,18 @@ static void list_dir(const struct shell *shell, const char *path, int depth)
 
 static int cmd_list(const struct shell *shell, size_t argc, char **argv)
 {
+	struct offline_log_status st;
 	char root[160];
 	int n;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+
+	offline_log_get_status(&st);
+	if (!st.card_mounted) {
+		shell_error(shell, "SD card is not mounted");
+		return -ENODEV;
+	}
 
 	n = snprintf(root, sizeof(root), "%s%s", offline_log_sd_mount_point(),
 		     CONFIG_OFFLINE_LOG_BASE_DIR);
@@ -143,6 +151,11 @@ static int cmd_demo(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+
+	if (!offline_log_sd_is_enabled()) {
+		shell_error(shell, "offline log backend is disabled");
+		return -ENODEV;
+	}
 
 	offline_log_event(OFFLINE_LOG_CAT_SYSTEM, OFFLINE_LOG_LEVEL_INF,
 			  "demo: system event");
