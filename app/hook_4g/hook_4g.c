@@ -416,6 +416,7 @@ struct hook_4g_at_wait {
 	uint16_t len;
 	int result;
 	bool pending;
+	bool sensitive;
 };
 
 static struct hook_4g_at_wait hook_4g_at_wait;
@@ -668,6 +669,19 @@ static int hook_4g_at_tail_result(const uint8_t *buf, uint16_t len)
 	return -EBADMSG;
 }
 
+static bool hook_4g_at_cmd_is_sensitive(const char *cmd)
+{
+	static const char password_cmd[] = "AT+MQTTPSW";
+
+	if ((cmd == NULL) ||
+	    (strncmp(cmd, password_cmd, sizeof(password_cmd) - 1U) != 0)) {
+		return false;
+	}
+
+	return (cmd[sizeof(password_cmd) - 1U] == '\0') ||
+	       (cmd[sizeof(password_cmd) - 1U] == '=');
+}
+
 /* Start collecting a module AT answer (called when a usr.cn command is sent). */
 int hook_4g_at_exchange_start(void)
 {
@@ -714,7 +728,10 @@ static void hook_4g_at_exchange_finish(void)
 		if (copy > 0U) {
 			hook_4g_at_wait.result =
 				hook_4g_at_tail_result(hook_4g_at_buf, copy);
-			if (hook_4g_at_wait.result == -EBADMSG) {
+			if (hook_4g_at_wait.sensitive) {
+				LOG_WRN("sensitive AT exchange failed (%d), response suppressed",
+					hook_4g_at_wait.result);
+			} else if (hook_4g_at_wait.result == -EBADMSG) {
 				/*
 				 * Show what the module actually said: not every
 				 * answer is terminated by OK/ERROR (this build
@@ -879,6 +896,7 @@ int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
 	hook_4g_at_wait.len = 0U;
 	hook_4g_at_wait.result = -ETIMEDOUT;
 	hook_4g_at_wait.resp[0] = '\0';
+	hook_4g_at_wait.sensitive = hook_4g_at_cmd_is_sensitive(cmd);
 	hook_4g_at_wait.pending = true;
 
 	hook_4g_at_len = 0U;
@@ -897,7 +915,8 @@ int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
 			hook_4g_at_active = false;
 			hook_4g_at_wait.pending = false;
 			k_mutex_unlock(&hook_4g_at_mutex);
-			LOG_ERR("AT command '%s' could not be sent (%d)", cmd,
+			LOG_ERR("AT command '%s' could not be sent (%d)",
+				hook_4g_at_wait.sensitive ? "AT+MQTTPSW" : cmd,
 				sent);
 			return -EIO;
 		}
@@ -1031,7 +1050,15 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	}
 
 	if (hook_4g_hex_echo_enabled) {
-		hook_4g_hex_dump(buf, len);
+		if (hook_4g_at_active && hook_4g_at_wait.sensitive) {
+			static const uint8_t redacted[] =
+				"\r\n[4g sensitive AT frame redacted]\r\n";
+
+			(void)hook_console_send(redacted,
+						(uint16_t)(sizeof(redacted) - 1U));
+		} else {
+			hook_4g_hex_dump(buf, len);
+		}
 	}
 
 	/*
@@ -1089,8 +1116,18 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 	if ((len >= 7U) && (memcmp(buf, "usr.cn#", 7U) == 0)) {
 		const uint8_t *body = &buf[7];
 		uint16_t body_len = (uint16_t)(len - 7U);
+		bool sensitive =
+			(body_len >= 10U) &&
+			(memcmp(body, "AT+MQTTPSW", 10U) == 0);
 
-		(void)hook_console_send(body, body_len);
+		if (sensitive) {
+			static const uint8_t redacted[] = "AT+MQTTPSW=***\r\n";
+
+			(void)hook_console_send(redacted,
+						(uint16_t)(sizeof(redacted) - 1U));
+		} else {
+			(void)hook_console_send(body, body_len);
+		}
 
 		/*
 		 * "usr.cn#AT..." is the module echoing a command line we sent -
@@ -1103,7 +1140,7 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 		 * still mirrored, so only the echo is dropped from MQTT.
 		 * Anything else the module prefixes with usr.cn# is kept.
 		 */
-		if (!((body_len >= 2U) && (body[0] == 'A') &&
+		if (!sensitive && !((body_len >= 2U) && (body[0] == 'A') &&
 		      (body[1] == 'T'))) {
 			(void)hook_4g_mqtt_reply(body, body_len);
 		}

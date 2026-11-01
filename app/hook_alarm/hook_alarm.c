@@ -18,6 +18,7 @@
 #include "hook_health.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_system_state.h"
 #include "modbus_rtu_master.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
@@ -85,7 +86,6 @@ static uint16_t hook_alarm_volume_now;
 static uint16_t hook_alarm_volume_sent;
 /* Last volume value we tried to send, confirmed or not. */
 static uint16_t hook_alarm_volume_attempt;
-static bool hook_alarm_led_online;
 static uint32_t hook_alarm_last_led_retry_ms;
 /*
  * Last LED state the module acknowledged (0xFF = unknown, e.g. right after
@@ -141,11 +141,6 @@ void hook_alarm_force_volume_sync(void)
 	hook_alarm_volume_attempt = 0xFFFFU;
 }
 
-bool hook_alarm_led_is_online(void)
-{
-	return hook_alarm_led_online;
-}
-
 /*
  * Any answered request proves that the module is alive: report it to the
  * health service (app/hook_health), which owns the online/offline decision and
@@ -154,13 +149,11 @@ bool hook_alarm_led_is_online(void)
  */
 static void hook_alarm_report_online(void)
 {
-	hook_alarm_led_online = true;
 	hook_health_report(HOOK_HEALTH_EVENT_ALARM);
 }
 
 static void hook_alarm_log_failure(const char *what)
 {
-	hook_alarm_led_online = false;
 	LOG_ERR_RATELIMIT("alarm module %s failed", what);
 }
 
@@ -435,7 +428,7 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 		 */
 		hook_health_task_alive(HOOK_TASK_ALIVE_ALARM);
 
-		if ((is_soft_standby != 1U) && !hook_alarm_suspended &&
+		if (!hook_system_state_is_soft_standby() && !hook_alarm_suspended &&
 		    ((int32_t)(hook_get_time_ms() - hook_alarm_resume_after_ms) >= 0)) {
 			hook_alarm_volume_sync();
 

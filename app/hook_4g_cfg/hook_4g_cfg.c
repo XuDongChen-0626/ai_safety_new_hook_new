@@ -23,6 +23,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -108,8 +109,8 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 /* How an entry is compared against the module's read back value. */
 enum cfg_match {
 	CFG_MATCH_EXACT = 0,  /* value equals the expectation            */
-	CFG_MATCH_CONTAINS,   /* value contains the expectation          */
 	CFG_MATCH_LINE,       /* answer holds a line equal to the value  */
+	CFG_MATCH_WKMOD,      /* MQTT,NOR or the module's plain "MQTT"   */
 };
 
 struct cfg_entry {
@@ -297,11 +298,10 @@ static void cfg_build(void)
 		       CFG_CID_SUFFIX);
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+WKMOD=%s", CFG_WKMOD);
-	/* Some module builds answer plain "MQTT", so the mode is matched by
-	 * containment - a strict compare would trigger the factory CLEAR on
-	 * every boot.
+	/* Some module builds answer plain "MQTT", which is accepted as the
+	 * normalized form. MQTT,TRAN and every other sub-mode are rejected.
 	 */
-	cfg_add(cmd, "MQTT", "AT+WKMOD", CFG_MATCH_CONTAINS);
+	cfg_add(cmd, CFG_WKMOD, "AT+WKMOD", CFG_MATCH_WKMOD);
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+MQTTMOD=%s", CFG_MQTTMOD);
 	cfg_add(cmd, CFG_MQTTMOD, "AT+MQTTMOD", CFG_MATCH_EXACT);
@@ -318,12 +318,13 @@ static void cfg_build(void)
 		       hook_params_mqtt_user());
 	cfg_add(cmd, hook_params_mqtt_user(), "AT+MQTTUSER", CFG_MATCH_EXACT);
 
-	/* The password cannot be read back reliably, so it is only written
-	 * (never compared); modem.cfg_hash covers changes to it.
+	/* The module supports reading the MQTT password back. Keep it in the
+	 * normal compare/verify path so a module that loses only its password
+	 * cannot be mistaken for a fully configured module.
 	 */
 	(void)snprintk(cmd, sizeof(cmd), "AT+MQTTPSW=%s",
 		       hook_params_mqtt_password());
-	cfg_add(cmd, hook_params_mqtt_password(), NULL, CFG_MATCH_EXACT);
+	cfg_add(cmd, hook_params_mqtt_password(), "AT+MQTTPSW", CFG_MATCH_EXACT);
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+MQTTCID=%s", cfg_cid);
 	cfg_add(cmd, cfg_cid, "AT+MQTTCID", CFG_MATCH_EXACT);
@@ -394,6 +395,58 @@ static void cfg_hash_text(char *buf, size_t buf_len)
 	(void)snprintk(buf, buf_len, "%08x", cfg_hash());
 }
 
+static bool cfg_value_is_work_mode(const char *value)
+{
+	return (strcmp(value, CFG_WKMOD) == 0) ||
+	       (strcmp(value, "MQTT") == 0);
+}
+
+static const char *cfg_loggable_cmd(const struct cfg_entry *entry)
+{
+	static const char secret_prefix[] = "AT+MQTTPSW=";
+
+	if ((entry != NULL) &&
+	    (strncmp(entry->cmd, secret_prefix,
+		     sizeof(secret_prefix) - 1U) == 0)) {
+		return "AT+MQTTPSW";
+	}
+
+	return (entry != NULL) ? entry->cmd : "?";
+}
+
+static int cfg_validate_credentials(void)
+{
+	const char *server = hook_params_mqtt_server();
+	const char *port = hook_params_mqtt_port();
+	const char *user = hook_params_mqtt_user();
+	const char *password = hook_params_mqtt_password();
+	char *end = NULL;
+	unsigned long port_value;
+
+	if ((server[0] == '\0') || (port[0] == '\0') ||
+	    (user[0] == '\0') || (password[0] == '\0')) {
+		LOG_ERR("provision: MQTT server/port/user/password must not be empty");
+		return -EINVAL;
+	}
+
+	if ((strpbrk(server, ",\r\n") != NULL) ||
+	    (strpbrk(user, ",\r\n") != NULL) ||
+	    (strpbrk(password, "\r\n") != NULL)) {
+		LOG_ERR("provision: MQTT parameters contain an unsupported delimiter");
+		return -EINVAL;
+	}
+
+	errno = 0;
+	port_value = strtoul(port, &end, 10);
+	if ((errno != 0) || (end == port) || (*end != '\0') ||
+	    (port_value == 0UL) || (port_value > 65535UL)) {
+		LOG_ERR("provision: invalid MQTT port '%s'", port);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cfg_write_entry(const struct cfg_entry *entry)
 {
 	char resp[256];
@@ -405,7 +458,8 @@ static int cfg_write_entry(const struct cfg_entry *entry)
 			return 0;
 		}
 
-		LOG_WRN("provision: '%s' failed (%d), retry %u", entry->cmd, ret,
+		LOG_WRN("provision: '%s' failed (%d), retry %u",
+			cfg_loggable_cmd(entry), ret,
 			(unsigned int)(attempt + 1U));
 
 		/* An unanswered command usually means the module is restarting
@@ -414,7 +468,7 @@ static int cfg_write_entry(const struct cfg_entry *entry)
 		 */
 		if (cfg_wait_modem(CFG_READY_TIMEOUT_MS) != 0) {
 			LOG_WRN("provision: module did not come back for '%s'",
-				entry->cmd);
+				cfg_loggable_cmd(entry));
 			break;
 		}
 	}
@@ -459,8 +513,8 @@ static void cfg_collect_diff(bool *diff, size_t *diff_count)
 			diff[i] = !cfg_resp_has_line(resp, entry->expect);
 		} else if (!cfg_resp_value(resp, value, sizeof(value))) {
 			diff[i] = true;
-		} else if (entry->match == CFG_MATCH_CONTAINS) {
-			diff[i] = (strstr(value, entry->expect) == NULL);
+		} else if (entry->match == CFG_MATCH_WKMOD) {
+			diff[i] = !cfg_value_is_work_mode(value);
 		} else {
 			diff[i] = (strcmp(value, entry->expect) != 0);
 		}
@@ -508,7 +562,6 @@ static int cfg_provision_once(bool factory)
 	bool diff[CFG_ENTRY_MAX];
 	size_t diff_count = 0U;
 	bool need_full = factory;
-	int ret;
 
 	cfg_state = HOOK_4G_CFG_READ;
 
@@ -523,7 +576,7 @@ static int cfg_provision_once(bool factory)
 		stored_hash[0] = '\0';
 	}
 
-	if (strstr(mode, "MQTT") == NULL) {
+	if (!cfg_value_is_work_mode(mode)) {
 		LOG_INF("provision: module mode is '%s', factory flow needed", mode);
 		need_full = true;
 	}
@@ -583,7 +636,8 @@ static int cfg_provision_once(bool factory)
 
 		if (cfg_write_entry(&cfg_entries[i]) != 0) {
 			hook_heartbeat_set_suspend(false);
-			LOG_ERR("provision: writing '%s' failed", cfg_entries[i].cmd);
+			LOG_ERR("provision: writing '%s' failed",
+				cfg_loggable_cmd(&cfg_entries[i]));
 			return -EIO;
 		}
 	}
@@ -618,15 +672,7 @@ static int cfg_provision_once(bool factory)
 		return -EAGAIN;
 	}
 
-	ret = cfg_verify_link();
 	hook_heartbeat_set_suspend(false);
-
-	if (ret != 0) {
-		/* The configuration reads back correctly, so this is a network
-		 * problem rather than a configuration one.
-		 */
-		return -ENOTCONN;
-	}
 
 	/*
 	 * Remember the parameter set that is now applied to the module.
@@ -654,11 +700,11 @@ static int cfg_provision_once(bool factory)
 	}
 
 	cfg_state = HOOK_4G_CFG_DONE;
-	LOG_INF("provision: configured and connected (cid=%s, dev=%s)", cfg_cid,
+	LOG_INF("provision: configured and verified (cid=%s, dev=%s)", cfg_cid,
 		cfg_dev);
 	(void)offline_log_event(
 		OFFLINE_LOG_CAT_NETWORK, OFFLINE_LOG_LEVEL_INF,
-		"4g provisioning done: cid=%s, topics %s/%s/...", cfg_cid,
+		"4g provisioning verified: cid=%s, topics %s/%s/...", cfg_cid,
 		CFG_TOPIC_PREFIX, cfg_dev);
 
 	return 0;
@@ -667,7 +713,15 @@ static int cfg_provision_once(bool factory)
 static int cfg_run_with_retry(bool factory)
 {
 	int ret = -EIO;
-	bool link_retried = false;
+
+	ret = cfg_validate_credentials();
+	if (ret != 0) {
+		cfg_state = HOOK_4G_CFG_FAILED;
+		(void)offline_log_event(
+			OFFLINE_LOG_CAT_NETWORK, OFFLINE_LOG_LEVEL_ERR,
+			"4g provisioning rejected: MQTT credentials are empty or invalid");
+		return ret;
+	}
 
 	/*
 	 * Wait for the module once, outside the retry budget: a cold module
@@ -691,27 +745,6 @@ static int cfg_run_with_retry(bool factory)
 		ret = cfg_provision_once(factory);
 		if (ret == 0) {
 			return 0;
-		}
-
-		if (ret == -ENOTCONN) {
-			/*
-			 * The configuration is stored and reads back correctly,
-			 * the module simply has not connected to the broker yet.
-			 * Give it one more full cycle (the link may need another
-			 * restart), then accept: a missing network is not a
-			 * configuration fault and retrying would not help.
-			 */
-			if (link_retried) {
-				cfg_state = HOOK_4G_CFG_DONE;
-				LOG_WRN("provision: configuration stored but MQTT not connected");
-				(void)offline_log_event(
-					OFFLINE_LOG_CAT_NETWORK,
-					OFFLINE_LOG_LEVEL_WRN,
-					"4g provisioning: configuration stored but MQTT not connected (network?), not retried");
-				return 0;
-			}
-
-			link_retried = true;
 		}
 
 		LOG_WRN("provision attempt %u/%u failed: %d",
@@ -957,7 +990,7 @@ int hook_4g_cfg_enter_mqtt(void)
 
 		if (cfg_write_entry(&cfg_entries[i]) != 0) {
 			LOG_ERR("HTTP OTA: writing '%s' on the switch-back failed",
-				cfg_entries[i].cmd);
+				cfg_loggable_cmd(&cfg_entries[i]));
 			ret = -EIO;
 			goto out;
 		}

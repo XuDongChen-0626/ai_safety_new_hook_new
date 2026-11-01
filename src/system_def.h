@@ -152,14 +152,6 @@ typedef enum {
 				HOOK_TASK_ALIVE_HEARTBEAT | HOOK_TASK_ALIVE_RTC | \
 				HOOK_TASK_ALIVE_4G)
 
-/* ------------------------------------------------------------------ */
-/* Runtime flags (defined in src/hook_task.c)                          */
-/* ------------------------------------------------------------------ */
-extern volatile uint8_t is_power_sleep_flag; /* 1 = soft standby active */
-extern volatile uint8_t is_ota_updating;     /* 1 = OTA in progress */
-extern uint16_t hook_main_status;            /* 1 normal / 2 sleep / 3 error */
-extern volatile uint16_t is_soft_standby;    /* 1 = soft standby (outputs off) */
-
 #ifdef __cplusplus
 }
 #endif

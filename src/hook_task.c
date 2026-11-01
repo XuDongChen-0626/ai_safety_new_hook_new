@@ -18,18 +18,11 @@
 #include "hook_rtc.h"
 #include "hook_work_mode.h"
 #include "osal_zephyr.h"
-#include "system_def.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(hook_task, CONFIG_LOG_DEFAULT_LEVEL);
-
-/* Shared runtime flags (old sys_def.c / GPS app globals). */
-volatile uint8_t is_power_sleep_flag;
-volatile uint8_t is_ota_updating;
-volatile uint16_t is_soft_standby;
-uint16_t hook_main_status = 1U;
 
 void init_app_hook_task(void)
 {

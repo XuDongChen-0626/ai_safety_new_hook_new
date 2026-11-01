@@ -32,9 +32,6 @@ void hook_alarm_set_suspend(bool suspended);
 /* Force the volume register to be pushed to the module again. */
 void hook_alarm_force_volume_sync(void);
 
-/* True while the module answered the last LED command. */
-bool hook_alarm_led_is_online(void);
-
 #ifdef __cplusplus
 }
 #endif

@@ -29,6 +29,7 @@
 #include "hook_heartbeat.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_system_state.h"
 #include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "pwr_stm32.h"
@@ -444,7 +445,7 @@ static void hook_rtc_enter_standby(void)
 /* Clear the alarm outputs and cut the alarm-light supply (soft standby). */
 static void hook_rtc_sleep_enter(void)
 {
-	is_soft_standby = 1U;
+	hook_system_state_set_soft_standby(true);
 
 	hook_reg_set(CMD_LED_SWITCH, 0U);
 	hook_reg_set(CMD_BUZZER_7M, 0U);
@@ -472,7 +473,7 @@ static void hook_rtc_sleep_enter(void)
 
 static void hook_rtc_sleep_leave(void)
 {
-	is_soft_standby = 0U;
+	hook_system_state_set_soft_standby(false);
 
 	GPIO_WRITE(alarm_power_en_gpio, 1);
 	/*
@@ -548,7 +549,7 @@ static void hook_rtc_schedule_check(void)
 	should_sleep = hook_rtc_in_sleep_window(now_hhmm, off_hhmm, on_hhmm);
 
 	if (!should_sleep) {
-		if (is_soft_standby == 1U) {
+		if (hook_system_state_is_soft_standby()) {
 			hook_rtc_sleep_leave();
 		}
 		return;
@@ -560,14 +561,14 @@ static void hook_rtc_schedule_check(void)
 	 * standby is the lighter variant when only that one is enabled.
 	 */
 	if ((soft_enable == 0U) && (hard_enable == 0U)) {
-		if (is_soft_standby == 1U) {
+		if (hook_system_state_is_soft_standby()) {
 			hook_rtc_sleep_leave();
 			LOG_INF("[PWR] standby disabled by host, alarm power on");
 		}
 		return;
 	}
 
-	if (is_soft_standby == 0U) {
+	if (!hook_system_state_is_soft_standby()) {
 		hook_rtc_sleep_enter();
 	}
 

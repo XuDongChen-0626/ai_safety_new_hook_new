@@ -24,6 +24,7 @@
 #include "hook_params.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_system_state.h"
 #include "hook_heartbeat.h"
 #include "hook_rtc.h"
 #include "ota_manager_service.h"
@@ -51,7 +52,8 @@ static int cmd_hook_status(const struct shell *sh, size_t argc, char **argv)
 		    hook_reg_input_get(REG_ERROR_CODE));
 	shell_print(sh, "alarm power    : %s",
 		    hook_heartbeat_alarm_power_is_on() ? "on" : "off");
-	shell_print(sh, "soft standby   : %u (register %u)", is_soft_standby,
+	shell_print(sh, "soft standby   : %u (register %u)",
+		    hook_system_state_is_soft_standby() ? 1U : 0U,
 		    SOFT_STANDBY_ENABLE);
 	shell_print(sh, "heartbeat      : register %u = %u, enable = %u",
 		    CMD_HOST_HEARTBEAT, hook_reg_get(CMD_HOST_HEARTBEAT),

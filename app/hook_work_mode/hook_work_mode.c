@@ -2,9 +2,8 @@
  * hook_work_mode.c - aggregate the device work mode into the input registers.
  *
  * One thread, ported from the old app_sys_supervisor.c WorkModeTask (100 ms):
- * the error code, the battery level and the soft-standby flag are combined into
- * STATUS_WORK_MODE (input register 106), hook_main_status and
- * is_power_sleep_flag.
+ * the error code, the battery level and the soft-standby state are combined
+ * into STATUS_WORK_MODE (input register 106).
  *
  * The heart LED is NOT handled here any more: system_health_service drives it
  * from the health events (CONFIG_SYS_HEALTH_LED_INDICATOR_BACKEND).
@@ -16,6 +15,7 @@
 
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_system_state.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
 
@@ -25,13 +25,12 @@ static void hook_work_mode_logic(void)
 {
 	uint16_t error = hook_reg_input_get(REG_ERROR_CODE);
 	uint16_t battery = hook_reg_input_get(STATUS_BMS_BATTERY);
+	bool soft_standby = hook_system_state_is_soft_standby();
 	hook_work_mode_t mode;
-
-	is_power_sleep_flag = (is_soft_standby == 1U) ? 1U : 0U;
 
 	if (error != (uint16_t)ERR_NONE) {
 		mode = DEVICE_ERROR;
-	} else if (is_power_sleep_flag == 1U) {
+	} else if (soft_standby) {
 		mode = MODE_DEVICE_STANDBY;
 	} else if (battery <= (uint16_t)LOW_BATTERY_THRESHOLD) {
 		mode = MODE_LOW_BATTERY;
@@ -39,8 +38,6 @@ static void hook_work_mode_logic(void)
 		mode = MODE_COM_WORKING;
 	}
 
-	hook_main_status = (mode == MODE_DEVICE_STANDBY) ? 2U :
-			   (mode == DEVICE_ERROR) ? 3U : 1U;
 	hook_reg_input_set(STATUS_WORK_MODE, (uint16_t)mode);
 }
 

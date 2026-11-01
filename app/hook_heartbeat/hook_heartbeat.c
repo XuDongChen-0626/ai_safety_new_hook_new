@@ -36,6 +36,7 @@
 #include "hook_health.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
+#include "hook_system_state.h"
 #include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
@@ -264,7 +265,7 @@ static void hook_heartbeat_logic(void)
 		return;
 	}
 
-	if (is_soft_standby == 1U) {
+	if (hook_system_state_is_soft_standby()) {
 		/* Soft standby: the host normally stops sending heartbeats while
 		 * the controller sleeps, so this is not a communication problem.
 		 * Only keep the timers fed - no statistics, no offline log, no

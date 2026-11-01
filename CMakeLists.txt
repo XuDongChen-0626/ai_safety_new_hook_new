@@ -52,6 +52,7 @@ target_sources(app PRIVATE
 	src/board.c
 	src/hook_task.c
 	src/hook_shell.c
+	src/hook_system_state.c
 	src/modbus_rtu_master.c
 	src/modbus_rtu_slave.c
 	src/uart_manage_port.c
