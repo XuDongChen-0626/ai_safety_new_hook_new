@@ -36,31 +36,16 @@ typedef enum {
 
 static uint16_t hook_bms_read_results[READ_MSG_COUNT];
 
-static modbus_t hook_bms_read_telegrams[READ_MSG_COUNT] = {
-	[READ_BATT_LEVEL] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-			     .u16RegAdd = REG_BATTERY_LEVEL, .u16CoilsNo = 1U,
-			     .u16reg = &hook_bms_read_results[READ_BATT_LEVEL]},
-	[READ_REMAIN_DISCHARGE] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-				   .u16RegAdd = REG_REMAIN_DISCHARGE, .u16CoilsNo = 1U,
-				   .u16reg = &hook_bms_read_results[READ_REMAIN_DISCHARGE]},
-	[READ_TOTAL_VOLTAGE] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-				.u16RegAdd = REG_TOTAL_VOLTAGE, .u16CoilsNo = 1U,
-				.u16reg = &hook_bms_read_results[READ_TOTAL_VOLTAGE]},
-	[READ_IS_CHARGING] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-			      .u16RegAdd = REG_IS_CHARGING, .u16CoilsNo = 1U,
-			      .u16reg = &hook_bms_read_results[READ_IS_CHARGING]},
-	[READ_REMAIN_CHARGE] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-				.u16RegAdd = REG_REMAIN_CHARGE, .u16CoilsNo = 1U,
-				.u16reg = &hook_bms_read_results[READ_REMAIN_CHARGE]},
-	[READ_TOTAL_CURRENT] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-				.u16RegAdd = REG_TOTAL_CURRENT, .u16CoilsNo = 1U,
-				.u16reg = &hook_bms_read_results[READ_TOTAL_CURRENT]},
-	[READ_PROTECT_STATUS] = {.u8id = SLAVE_BMS_ID, .u8fct = MB_FC_READ_REGISTERS,
-				 .u16RegAdd = REG_PROTECT_STATUS, .u16CoilsNo = 1U,
-				 .u16reg = &hook_bms_read_results[READ_PROTECT_STATUS]},
+static const uint16_t hook_bms_read_addrs[READ_MSG_COUNT] = {
+	[READ_BATT_LEVEL] = REG_BATTERY_LEVEL,
+	[READ_REMAIN_DISCHARGE] = REG_REMAIN_DISCHARGE,
+	[READ_TOTAL_VOLTAGE] = REG_TOTAL_VOLTAGE,
+	[READ_IS_CHARGING] = REG_IS_CHARGING,
+	[READ_REMAIN_CHARGE] = REG_REMAIN_CHARGE,
+	[READ_TOTAL_CURRENT] = REG_TOTAL_CURRENT,
+	[READ_PROTECT_STATUS] = REG_PROTECT_STATUS,
 };
 
-static osal_notify_t hook_bms_notify;
 static uint32_t hook_bms_discharge_samples[BMS_SAMPLE_BUFFER_SIZE];
 static uint32_t hook_bms_charge_samples[BMS_SAMPLE_BUFFER_SIZE];
 static uint8_t hook_bms_discharge_idx;
@@ -68,11 +53,10 @@ static uint8_t hook_bms_discharge_count;
 static uint8_t hook_bms_charge_idx;
 static uint8_t hook_bms_charge_count;
 
-static uint32_t hook_bms_query(hook_bms_read_idx_t idx)
+static int hook_bms_query(hook_bms_read_idx_t idx)
 {
-	ModbusQuery(&hook_bms_master, hook_bms_read_telegrams[idx]);
-
-	return osal_notify_wait(&hook_bms_notify, MODBUS_WAIT_TIMEOUT_MS);
+	return hook_modbus_bms_read_holding(hook_bms_read_addrs[idx],
+					    &hook_bms_read_results[idx]);
 }
 
 /*
@@ -85,7 +69,7 @@ static bool hook_bms_read_remaining_times(void)
 	bool any_ok = false;
 	uint16_t value;
 
-	if (hook_bms_query(READ_REMAIN_DISCHARGE) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_REMAIN_DISCHARGE) == 0) {
 		any_ok = true;
 		value = hook_bms_read_results[READ_REMAIN_DISCHARGE];
 		if (value != 0xFFFFU) {
@@ -100,7 +84,7 @@ static bool hook_bms_read_remaining_times(void)
 		LOG_ERR_RATELIMIT("remaining discharge time read failed");
 	}
 
-	if (hook_bms_query(READ_PROTECT_STATUS) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_PROTECT_STATUS) == 0) {
 		any_ok = true;
 		hook_reg_input_set(STATUS_BMS_PROTECT_STATUS,
 			     hook_bms_read_results[READ_PROTECT_STATUS]);
@@ -110,7 +94,7 @@ static bool hook_bms_read_remaining_times(void)
 		LOG_ERR_RATELIMIT("BMS protect status read failed");
 	}
 
-	if (hook_bms_query(READ_REMAIN_CHARGE) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_REMAIN_CHARGE) == 0) {
 		any_ok = true;
 		value = hook_bms_read_results[READ_REMAIN_CHARGE];
 		if (value != 0xFFFFU) {
@@ -147,7 +131,7 @@ static bool hook_bms_read_slow_values(void)
 {
 	bool any_ok = false;
 
-	if (hook_bms_query(READ_BATT_LEVEL) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_BATT_LEVEL) == 0) {
 		any_ok = true;
 		hook_reg_input_set(STATUS_BMS_BATTERY,
 			     hook_bms_read_results[READ_BATT_LEVEL]);
@@ -158,7 +142,7 @@ static bool hook_bms_read_slow_values(void)
 		hook_reg_input_set(STATUS_BMS_BATTERY, 0U);
 	}
 
-	if (hook_bms_query(READ_TOTAL_VOLTAGE) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_TOTAL_VOLTAGE) == 0) {
 		any_ok = true;
 		hook_reg_input_set(STATUS_BMS_TOTAL_VOLTAGE,
 			     hook_bms_read_results[READ_TOTAL_VOLTAGE]);
@@ -168,7 +152,7 @@ static bool hook_bms_read_slow_values(void)
 		LOG_ERR_RATELIMIT("BMS total voltage read failed");
 	}
 
-	if (hook_bms_query(READ_TOTAL_CURRENT) == OP_OK_QUERY) {
+	if (hook_bms_query(READ_TOTAL_CURRENT) == 0) {
 		any_ok = true;
 		int16_t current = (int16_t)hook_bms_read_results[READ_TOTAL_CURRENT];
 
@@ -215,8 +199,6 @@ static void hook_bms_thread(void *a, void *b, void *c)
 	(void)b;
 	(void)c;
 
-	osal_notify_register_current(&hook_bms_notify);
-
 	for (;;) {
 		bool any_ok = false;
 
@@ -262,8 +244,6 @@ static struct k_thread hook_bms_thread_obj;
 
 void hook_bms_start(void)
 {
-	osal_notify_init(&hook_bms_notify);
-
 	k_thread_create(&hook_bms_thread_obj, hook_bms_stack,
 			K_THREAD_STACK_SIZEOF(hook_bms_stack),
 			hook_bms_thread, NULL, NULL, NULL,

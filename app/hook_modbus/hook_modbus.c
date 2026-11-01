@@ -26,6 +26,8 @@ void hook_modbus_init(void)
 
 	/* External devices polled by this controller. */
 #if defined(CONFIG_HOOK_BMS_ENABLE) || defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
-	hook_modbus_master_init();
+	if (hook_modbus_master_init() != 0) {
+		LOG_ERR("one or more Modbus clients are unavailable");
+	}
 #endif
 }

@@ -71,16 +71,6 @@ LOG_MODULE_REGISTER(hook_alarm, CONFIG_LOG_DEFAULT_LEVEL);
 #define HOOK_ALARM_LED_CYCLE \
 	(HOOK_ALARM_LED_ON_STEPS + HOOK_ALARM_LED_OFF_STEPS)
 
-static osal_notify_t hook_alarm_notify;
-static uint16_t hook_alarm_payload;
-
-static modbus_t hook_alarm_telegram = {
-	.u8id = SLAVE_LED_ID,
-	.u8fct = MB_FC_WRITE_REGISTER,
-	.u16CoilsNo = 1U,
-	.u16reg = &hook_alarm_payload,
-};
-
 static uint16_t hook_alarm_volume_now;
 /* Last volume value the module confirmed (0xFFFF = nothing confirmed yet). */
 static uint16_t hook_alarm_volume_sent;
@@ -99,14 +89,9 @@ static volatile bool hook_alarm_suspended;
 /* Earliest uptime at which Modbus may talk to the module again. */
 static volatile uint32_t hook_alarm_resume_after_ms;
 
-static uint32_t hook_alarm_write(uint16_t reg_addr, uint16_t value)
+static int hook_alarm_write(uint16_t reg_addr, uint16_t value)
 {
-	hook_alarm_telegram.u16RegAdd = reg_addr;
-	hook_alarm_payload = value;
-
-	ModbusQuery(&hook_alarm_master, hook_alarm_telegram);
-
-	return osal_notify_wait(&hook_alarm_notify, MODBUS_WAIT_TIMEOUT_MS);
+	return hook_modbus_alarm_write_holding(reg_addr, value);
 }
 
 void hook_alarm_set_suspend(bool suspended)
@@ -172,7 +157,7 @@ static void hook_alarm_buzzer_logic(void)
 	static uint32_t busy_start_ms;
 	uint16_t raw_target_mode = 0U;
 	uint16_t current_mode;
-	uint32_t ret;
+	int ret;
 
 	if (hook_reg_get(CMD_BUZZER_3M) == 1U) {
 		raw_target_mode = 2U;
@@ -196,7 +181,7 @@ static void hook_alarm_buzzer_logic(void)
 
 	if (raw_target_mode == 2U) {
 		ret = hook_alarm_write(REG_SOUND_LIGHT_CTRL, CMD_SOUND_3M);
-		if (ret != OP_OK_QUERY) {
+		if (ret != 0) {
 			LOG_ERR("3 m siren write failed");
 			return;
 		}
@@ -206,7 +191,7 @@ static void hook_alarm_buzzer_logic(void)
 		busy_start_ms = hook_get_time_ms();
 	} else if (raw_target_mode == 1U) {
 		ret = hook_alarm_write(REG_SOUND_LIGHT_CTRL, CMD_SOUND_7M);
-		if (ret != OP_OK_QUERY) {
+		if (ret != 0) {
 			LOG_ERR("7 m siren write failed");
 			return;
 		}
@@ -216,7 +201,7 @@ static void hook_alarm_buzzer_logic(void)
 		busy_start_ms = hook_get_time_ms();
 	} else {
 		ret = hook_alarm_write(REG_SOUND_STOP, CMD_SOUND_STOP);
-		if (ret != OP_OK_QUERY) {
+		if (ret != 0) {
 			LOG_ERR("sound stop write failed");
 			return;
 		}
@@ -232,7 +217,7 @@ static void hook_alarm_led_logic(void)
 	uint16_t cmd_led_switch = hook_reg_get(CMD_LED_SWITCH);
 	uint16_t status_buzzer = hook_reg_input_get(STATUS_BUZZER);
 	uint16_t error_code = hook_reg_get_error_bits();
-	uint32_t ret;
+	int ret;
 
 	/* PWD_LED mirrors the Modbus flash-light command register, not the
 	 * supply state and not every blink phase.
@@ -269,7 +254,7 @@ static void hook_alarm_led_logic(void)
 						       (desired_state != 0U) ?
 							       CMD_LED_ON :
 							       CMD_LED_OFF);
-				if (ret == OP_OK_QUERY) {
+				if (ret == 0) {
 					hook_alarm_led_physical_state =
 						desired_state;
 					hook_reg_input_set(STATUS_LED_SWITCH, 1U);
@@ -291,7 +276,7 @@ static void hook_alarm_led_logic(void)
 		hook_alarm_last_led_retry_ms = hook_get_time_ms();
 
 		ret = hook_alarm_write(REG_LED_CTRL, CMD_LED_OFF);
-		if (ret == OP_OK_QUERY) {
+		if (ret == 0) {
 			hook_alarm_led_physical_state = 0U;
 			led_step_counter = 0U;
 			hook_reg_input_set(STATUS_LED_SWITCH, 0U);
@@ -316,8 +301,8 @@ static void hook_alarm_led_logic(void)
  *      The keepalive is an idempotent write of the value already in use (a
  *      register read is not guaranteed to be supported by this module).
  *   3. Only repeating the *same failed* value is limited to one attempt per
- *      second: an unanswered Modbus attempt blocks this thread for ~1 s
- *      (MODBUS_WAIT_TIMEOUT_MS), so retrying faster would only starve the
+ *      second: an unanswered Modbus attempt blocks this thread for up to
+ *      500 ms, so retrying faster would only starve the
  *      blink engine and flood the RS485 bus.
  *
  * A failed exchange is logged and (because it does not report success) lets
@@ -329,7 +314,7 @@ static void hook_alarm_volume_sync(void)
 	static uint32_t last_attempt_ms;
 	static uint32_t last_exchange_ms;
 	uint32_t now = hook_get_time_ms();
-	uint32_t ret;
+	int ret;
 
 	hook_alarm_volume_now = hook_reg_get(CMD_VOLUME);
 
@@ -350,7 +335,7 @@ static void hook_alarm_volume_sync(void)
 		hook_alarm_volume_attempt = hook_alarm_volume_now;
 
 		ret = hook_alarm_write(REG_VOLUME_CTRL, hook_alarm_volume_now);
-		if (ret == OP_OK_QUERY) {
+		if (ret == 0) {
 			LOG_DBG("alarm volume set to %u", hook_alarm_volume_now);
 			hook_alarm_volume_sent = hook_alarm_volume_now;
 			hook_alarm_report_online();
@@ -367,7 +352,7 @@ static void hook_alarm_volume_sync(void)
 	last_exchange_ms = now;
 
 	ret = hook_alarm_write(REG_VOLUME_CTRL, hook_alarm_volume_now);
-	if (ret == OP_OK_QUERY) {
+	if (ret == 0) {
 		hook_alarm_report_online();
 	} else {
 		hook_alarm_log_failure("keepalive write");
@@ -380,7 +365,7 @@ static void hook_alarm_volume_sync(void)
  */
 static void hook_alarm_power_on_self_test(void)
 {
-	uint32_t ret;
+	int ret;
 
 	LOG_INF("[POST] alarm module self test");
 	/*
@@ -394,7 +379,7 @@ static void hook_alarm_power_on_self_test(void)
 
 	ret = hook_alarm_write(0x2303U, 0x0001U);
 	GPIO_WRITE(pwr_led_gpio, 1);
-	if (ret == OP_OK_QUERY) {
+	if (ret == 0) {
 		LOG_INF("[POST] sound & light test command accepted");
 	} else {
 		LOG_ERR("[POST] sound & light test command failed");
@@ -417,8 +402,6 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 	(void)a;
 	(void)b;
 	(void)c;
-
-	osal_notify_register_current(&hook_alarm_notify);
 
 	hook_alarm_power_on_self_test();
 
@@ -453,7 +436,6 @@ static struct k_thread hook_alarm_thread_obj;
 
 void hook_alarm_start(void)
 {
-	osal_notify_init(&hook_alarm_notify);
 	hook_alarm_force_volume_sync();
 
 	k_thread_create(&hook_alarm_thread_obj, hook_alarm_stack,
