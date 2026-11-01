@@ -32,7 +32,6 @@ add_subdirectory(app/hook_params)
 
 target_include_directories(app PRIVATE
 	src
-	component/am_modbus
 	app/hook_modbus
 	app/hook_alarm
 	app/hook_bms
@@ -56,9 +55,7 @@ target_sources(app PRIVATE
 	src/hook_console.c
 	src/modbus_rtu_master.c
 	src/modbus_rtu_slave.c
-	src/osal_zephyr.c
 	src/pwr_stm32.c
-	component/am_modbus/Modbus.c
 )
 
 target_link_libraries(app PRIVATE

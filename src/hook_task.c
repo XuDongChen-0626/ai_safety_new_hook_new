@@ -17,7 +17,6 @@
 #include "hook_heartbeat.h"
 #include "hook_rtc.h"
 #include "hook_work_mode.h"
-#include "osal_zephyr.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>

@@ -52,11 +52,10 @@ uint16_t hook_reg_get_error_bits(void);
 /* Register table + data model (+ optional persistent store) bring-up. */
 int hook_register_init(void);
 
-/* Register access callbacks handed to component/am_modbus (slave side). */
-int8_t hook_reg_model_read(uint16_t address, uint16_t *value, void *user_data);
-int8_t hook_reg_model_write(uint16_t address, uint16_t value, void *user_data);
-int8_t hook_reg_model_read_input(uint16_t address, uint16_t *value,
-				 void *user_data);
+/* Database access used by the Zephyr Modbus server adapter. */
+int hook_reg_model_read(uint16_t address, uint16_t *value);
+int hook_reg_model_write(uint16_t address, uint16_t value);
+int hook_reg_model_read_input(uint16_t address, uint16_t *value);
 
 #ifdef __cplusplus
 }

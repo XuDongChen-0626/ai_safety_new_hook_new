@@ -224,45 +224,38 @@ void hook_reg_clear_error_bits(uint16_t mask)
 	hook_reg_input_set_bits(REG_ERROR_CODE, mask, 0U);
 }
 
-/* --- component/am_modbus slave callbacks --------------------------- */
+/* --- Zephyr Modbus server register adapter -------------------------- */
 
-int8_t hook_reg_model_read(uint16_t address, uint16_t *value, void *user_data)
+int hook_reg_model_read(uint16_t address, uint16_t *value)
 {
-	ARG_UNUSED(user_data);
-
 	if (value == NULL) {
-		return (int8_t)-EINVAL;
+		return -EINVAL;
 	}
 
 	if (modbus_data_model_read_holding(address, value) != 0) {
-		return (int8_t)-EIO;
+		return -EIO;
 	}
 
 	return 0;
 }
 
-int8_t hook_reg_model_write(uint16_t address, uint16_t value, void *user_data)
+int hook_reg_model_write(uint16_t address, uint16_t value)
 {
-	ARG_UNUSED(user_data);
-
 	if (modbus_data_model_write_holding(address, value) != 0) {
-		return (int8_t)-EIO;
+		return -EIO;
 	}
 
 	return 0;
 }
 
-int8_t hook_reg_model_read_input(uint16_t address, uint16_t *value,
-				 void *user_data)
+int hook_reg_model_read_input(uint16_t address, uint16_t *value)
 {
-	ARG_UNUSED(user_data);
-
 	if (value == NULL) {
-		return (int8_t)-EINVAL;
+		return -EINVAL;
 	}
 
 	if (modbus_data_model_read_input(address, value) != 0) {
-		return (int8_t)-EIO;
+		return -EIO;
 	}
 
 	return 0;

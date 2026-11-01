@@ -45,7 +45,7 @@
 | `Core/Src/freertos.c` + `application/app_hook_task.c`（任务创建） | `src/main.c` + `src/hook_task.c` |
 | `cmsis_os.h` / `osDelay` / `xTaskNotify` | Zephyr kernel + `src/osal_zephyr.{h,c}` |
 | HAL UART + DMA 串口管理（`component/uart_manage`） | `src/hook_4g_uart.c`（Zephyr UART Async API + DMA；双缓冲 RX、20 ms 空闲分帧、串行化 TX 队列） |
-| `Com/am_modbus`（RTU 主/从机） | `component/am_modbus/`（Zephyr 移植版） |
+| `Com/am_modbus`（RTU 主/从机） | Zephyr Modbus subsystem（`src/modbus_rtu_{slave,master}.c`） |
 | `application/modbus_rtu_server_interface.c`（MB_Reg_* 寄存器） | `app/hook_modbus/`（寄存器存储 + 上位机 RTU 从机 + 两台 RTU 主机） |
 | `application/app_bms_alarm.c`（声光 / BMS） | `app/hook_alarm/` + `app/hook_bms/` |
 | `application/app_relay.c`（上位机心跳监督 + 声光供电） | `app/hook_heartbeat/` |
@@ -82,7 +82,6 @@ RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-g
 | `AlarmTask` | `app/hook_alarm` | 100 ms（声光逻辑 500 ms） | 2 |
 | `App4GTask` | `app/hook_4g` | 事件驱动（不再周期保活） | 2 |
 | `BmsMaster` | `app/hook_bms` | 100 ms（500 ms / 10 s 轮询） | 3 |
-| `TaskModbusSlave` / `TaskModbusMaster` | `component/am_modbus` | 事件驱动 | 3 |
 | `RtcPwrSched` | `app/hook_rtc` | 1 s（校准/时间发布；调度检查 5 s） | 4 |
 | `WorkModeTask` | `app/hook_work_mode` | 100 ms（聚合工作模式到输入寄存器 106） | 5 |
 | `HookHealth` | `app/hook_health` | 1 s | 6 |
@@ -226,8 +225,7 @@ app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_heartbeat 
             hook_rtc / hook_4g / hook_ota / hook_work_mode / hook_health /
             hook_params）
 boards/     自定义板级定义 craner_hook_stm32h743vit6
-component/  可移植组件（am_modbus 从机寄存器回调 /
-            offline_log_service 离线事件日志）
+component/  可移植组件（offline_log_service 离线事件日志）
 config/     产品配置片段（Kconfig / sysbuild）
 docs/       迁移说明与寄存器映射
 module/     复用服务（system_health / time_manager / ota_manager / fault_dump /
@@ -281,8 +279,8 @@ tool/       开发工作流脚本
    RTU 只是调试口（上位机通过 MQTT/0xA5 访问设备状态），地址变化不影响云端协议。
    详见 `docs/寄存器映射.md`。
 6. **寄存器实现**：寄存器表由 `module/modbus_data_model` 承载（名称 / 地址 /
-   读写权限 / 默认值），RTU 从机通过 `component/am_modbus` 的寄存器回调直接读写
-   该表；未在表中定义的地址读回 0、写被忽略。定时开关机时间（H0x10/H0x11）标记为
+   读写权限 / 默认值），Zephyr Modbus RTU 从机适配层直接读写该表；未在表中定义
+   的地址读回 0、写被忽略。定时开关机时间（H0x10/H0x11）标记为
    `PERSISTENT`，保存到 W25Q64 的 `modbus-store` 分区（偏移 0x20000，8 KiB）：
    NOR 擦除单位 4 KiB，两个 bank 各自正好一个扇区，因此是**真正的双 bank** ——
    保存过程中掉电只会退回上一份配置，不会丢配置。

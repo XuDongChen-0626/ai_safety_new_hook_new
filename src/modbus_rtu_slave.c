@@ -65,7 +65,7 @@ static int hook_slave_holding_read(uint16_t addr, uint16_t *reg)
 	 * Preserve the old wire behaviour: an unmapped address reads as zero
 	 * and does not turn a valid FC03/FC04 request into an exception.
 	 */
-	(void)hook_reg_model_read(addr, &value, NULL);
+	(void)hook_reg_model_read(addr, &value);
 	*reg = value;
 	return 0;
 }
@@ -77,7 +77,7 @@ static int hook_slave_holding_write(uint16_t addr, uint16_t reg)
 	 * server discarded those writes but still acknowledged the request, so
 	 * do not convert them into an illegal-address exception.
 	 */
-	(void)hook_reg_model_write(addr, reg, NULL);
+	(void)hook_reg_model_write(addr, reg);
 	return 0;
 }
 
@@ -89,7 +89,7 @@ static int hook_slave_input_read(uint16_t addr, uint16_t *reg)
 		return -EINVAL;
 	}
 
-	(void)hook_reg_model_read_input(addr, &value, NULL);
+	(void)hook_reg_model_read_input(addr, &value);
 	*reg = value;
 	return 0;
 }
