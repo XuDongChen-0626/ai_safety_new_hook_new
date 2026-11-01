@@ -6,20 +6,18 @@
 
 #include <stdint.h>
 
-#include "Modbus.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern modbusHandler_t hook_host_slave;
-
 /*
- * Start the RTU server thread. Holding and input registers are served from
+ * Start the Zephyr RTU server. Holding and input registers are served from
  * the register table of app/hook_modbus (module/modbus_data_model) through
  * the hook_reg_model_* callbacks.
+ *
+ * @return 0 on success, otherwise a negative errno.
  */
-void hook_modbus_slave_init(uint16_t reg_count, uint8_t slave_id);
+int hook_modbus_slave_init(uint16_t reg_count, uint8_t slave_id);
 
 #ifdef __cplusplus
 }

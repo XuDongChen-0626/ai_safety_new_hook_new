@@ -20,7 +20,9 @@ void hook_modbus_init(void)
 	}
 
 	/* The hook is the RTU slave of the crane host controller (uart8). */
-	hook_modbus_slave_init(HOOK_REGISTER_COUNT, FORWARD_SLAVE_ADDR);
+	if (hook_modbus_slave_init(HOOK_REGISTER_COUNT, FORWARD_SLAVE_ADDR) != 0) {
+		LOG_ERR("host Modbus slave not started");
+	}
 
 	/* External devices polled by this controller. */
 #if defined(CONFIG_HOOK_BMS_ENABLE) || defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
