@@ -8,7 +8,6 @@
 
 #include "hook_task.h"
 #include "system_def.h"
-#include "uart_manage_port.h"
 
 #include <zephyr/logging/log.h>
 
@@ -51,6 +50,5 @@ void init_app(void)
 	LOG_INF("fw time: %s %s", __DATE__, __TIME__);
 
 	board_gpio_init();
-	init_uart_manage();
 	init_app_hook_task();
 }

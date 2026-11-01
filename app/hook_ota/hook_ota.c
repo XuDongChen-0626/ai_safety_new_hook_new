@@ -38,7 +38,6 @@
 #include "osal_zephyr.h"
 #include "ota_manager_service.h"
 #include "system_def.h"
-#include "uart_manage.h"
 
 LOG_MODULE_REGISTER(hook_ota, CONFIG_LOG_DEFAULT_LEVEL);
 

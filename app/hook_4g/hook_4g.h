@@ -25,8 +25,8 @@ void hook_4g_start(void);
 
 /*
  * Send raw bytes to the 4G module. All writes to the usr.cn link are
- * serialised here because the 4G thread and the OTA thread both transmit
- * (uart_manage itself is not re-entrant).
+ * serialised by the asynchronous UART TX queue because the 4G thread and the
+ * OTA thread both transmit.
  */
 int hook_4g_send(const uint8_t *data, uint16_t len);
 

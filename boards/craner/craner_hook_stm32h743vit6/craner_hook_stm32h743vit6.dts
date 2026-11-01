@@ -23,6 +23,7 @@
 #include <st/h7/stm32h743Xi.dtsi>
 #include <st/h7/stm32h743vitx-pinctrl.dtsi>
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/dma/stm32_dma.h>
 
 / {
 	model = "Craner AI Safety Hook STM32H743VIT6";
@@ -326,6 +327,19 @@
 	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
 	pinctrl-names = "default";
 	current-speed = <115200>;
+	/* USART1 RX/TX requests are 41/42 on STM32H7. */
+	dmas = <&dmamux1 0 42 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 1 41 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
+	status = "okay";
+};
+
+/* DMA controller feeding USART1 async RX/TX. */
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
 	status = "okay";
 };
 

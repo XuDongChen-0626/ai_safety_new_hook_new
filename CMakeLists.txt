@@ -32,7 +32,6 @@ add_subdirectory(app/hook_params)
 
 target_include_directories(app PRIVATE
 	src
-	component/uart_manage
 	component/am_modbus
 	app/hook_modbus
 	app/hook_alarm
@@ -53,14 +52,12 @@ target_sources(app PRIVATE
 	src/hook_task.c
 	src/hook_shell.c
 	src/hook_system_state.c
+	src/hook_4g_uart.c
+	src/hook_console.c
 	src/modbus_rtu_master.c
 	src/modbus_rtu_slave.c
-	src/uart_manage_port.c
 	src/osal_zephyr.c
 	src/pwr_stm32.c
-	component/uart_manage/uart_manage.c
-	component/uart_manage/fifo.c
-	component/uart_manage/lwrb.c
 	component/am_modbus/Modbus.c
 )
 

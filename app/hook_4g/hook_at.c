@@ -15,8 +15,6 @@
 #include "hook_heartbeat.h"
 #include "hook_ota.h"
 #include "hook_params.h"
-#include "uart_manage.h"
-#include "uart_manage_port.h"
 
 LOG_MODULE_REGISTER(hook_at, CONFIG_LOG_DEFAULT_LEVEL);
 

@@ -44,7 +44,7 @@
 | `crane_ai_satefy_hook.ioc` / `Core/Src/{main,gpio,usart,rtc,dma}.c` | `boards/craner/craner_hook_stm32h743vit6/`（devicetree + Kconfig） |
 | `Core/Src/freertos.c` + `application/app_hook_task.c`（任务创建） | `src/main.c` + `src/hook_task.c` |
 | `cmsis_os.h` / `osDelay` / `xTaskNotify` | Zephyr kernel + `src/osal_zephyr.{h,c}` |
-| HAL UART + DMA 串口管理（`component/uart_manage`） | `component/uart_manage/`（Zephyr 中断驱动移植版） |
+| HAL UART + DMA 串口管理（`component/uart_manage`） | `src/hook_4g_uart.c`（Zephyr UART Async API + DMA；双缓冲 RX、20 ms 空闲分帧、串行化 TX 队列） |
 | `Com/am_modbus`（RTU 主/从机） | `component/am_modbus/`（Zephyr 移植版） |
 | `application/modbus_rtu_server_interface.c`（MB_Reg_* 寄存器） | `app/hook_modbus/`（寄存器存储 + 上位机 RTU 从机 + 两台 RTU 主机） |
 | `application/app_bms_alarm.c`（声光 / BMS） | `app/hook_alarm/` + `app/hook_bms/` |
@@ -64,7 +64,7 @@
 | 功能 | 外设 | 引脚 (TX/RX) | 波特率 | Zephyr 归属 |
 | --- | --- | --- | --- | --- |
 | 调试 / shell / 日志 / MCUmgr | uart5 | PB6/PB5 | 115200 | Zephyr console + shell |
-| 4G / 云端透传（usr.cn） | usart1 | PA9/PA10 | 115200 | `component/uart_manage` 通道 `"4g"` |
+| 4G / 云端透传（usr.cn） | usart1 | PA9/PA10 | 115200 | `src/hook_4g_uart.c`（DMA TX/RX） |
 | 预留（原 GPS 口，本产品无 GPS 模块） | usart3 | PD8/PD9 | 115200 | 未启用（DTS `status = "disabled"`） |
 | 上位机 Modbus RTU 从机（RS485） | uart8 | PE1/PE0 | 9600 | `src/modbus_rtu_slave.c` |
 | BMS Modbus RTU 主机（RS485） | usart6 | PC6/PC7 | 9600 | `src/modbus_rtu_master.c` |
@@ -226,7 +226,7 @@ app/        产品应用（hook_modbus / hook_alarm / hook_bms / hook_heartbeat 
             hook_rtc / hook_4g / hook_ota / hook_work_mode / hook_health /
             hook_params）
 boards/     自定义板级定义 craner_hook_stm32h743vit6
-component/  可移植组件（uart_manage / am_modbus 从机寄存器回调 /
+component/  可移植组件（am_modbus 从机寄存器回调 /
             offline_log_service 离线事件日志）
 config/     产品配置片段（Kconfig / sysbuild）
 docs/       迁移说明与寄存器映射

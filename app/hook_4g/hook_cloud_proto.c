@@ -15,7 +15,6 @@
 #include "hook_ota.h"
 #include "offline_log_service.h"
 #include "system_def.h"
-#include "uart_manage.h"
 
 LOG_MODULE_REGISTER(hook_cloud, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -89,9 +88,9 @@ static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 
 	/*
 	 * Go through hook_4g_send(): it is muted while the module is in HTTPD
-	 * mode. Sending directly to uart_manage here would push this frame into
-	 * the HTTP request the module is building (observed on the bench as
-	 * "GET /s/xxx3,\xA5g... HTTP/1.1" on the server).
+	 * mode. Sending directly to the UART transport here would push this
+	 * frame into the HTTP request the module is building (observed on the
+	 * bench as "GET /s/xxx3,\xA5g... HTTP/1.1" on the server).
 	 */
 	(void)hook_4g_send(tx_buf, idx);
 }

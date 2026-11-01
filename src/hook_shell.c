@@ -18,6 +18,7 @@
 
 #include "board.h"
 #include "hook_at.h"
+#include "hook_console.h"
 #include "hook_4g.h"
 #include "hook_4g_cfg.h"
 #include "hook_ota.h"
@@ -30,7 +31,6 @@
 #include "ota_manager_service.h"
 #include "system_def.h"
 #include "time_manager_service.h"
-#include "uart_manage_port.h"
 
 #define HOOK_SHELL_RTC DEVICE_DT_GET(DT_NODELABEL(rtc))
 

@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -38,18 +39,19 @@
 #include "offline_log_service.h"
 #include "osal_zephyr.h"
 #include "system_def.h"
-#include "uart_manage.h"
-#include "uart_manage_port.h"
+#include "hook_4g_uart.h"
+#include "hook_console.h"
+
+#include <zephyr/sys/ring_buffer.h>
 
 LOG_MODULE_REGISTER(hook_4g, CONFIG_LOG_DEFAULT_LEVEL);
 
 /*
- * Frames delivered by uart_manage are published by the UART idle timer
- * (interrupt context), so they are appended to a single producer/single
- * consumer byte ring and their lengths are queued separately. Compared to
- * queueing whole frames this removes the (small) frame queue limit and the
- * copy-while-the-ISR-overwrites race, both of which could silently drop the
- * beginning of a long modem answer.
+ * Frames delivered by the UART async callback are appended to a single
+ * producer/single consumer byte ring and their lengths are queued separately.
+ * Compared to queueing whole frames this removes the (small) frame queue limit
+ * and the copy-while-the-DMA-overwrites race, both of which could silently drop
+ * the beginning of a long modem answer.
  */
 /*
  * Big enough to absorb the stalls of the HTTP OTA path: this thread writes
@@ -75,12 +77,10 @@ struct hook_4g_rx_block {
 };
 
 static uint8_t hook_4g_rx_ring_storage[HOOK_4G_RX_RING_SIZE];
-static lwrb_t hook_4g_rx_ring;
+static struct ring_buf hook_4g_rx_ring;
 static bool hook_4g_rx_ring_ready;
 
 K_MSGQ_DEFINE(hook_4g_frame_len_queue, sizeof(uint16_t), HOOK_4G_RX_LENQ_DEPTH, 2);
-
-K_MUTEX_DEFINE(hook_4g_tx_mutex);
 
 static volatile uint32_t hook_4g_rx_frames_isr;
 static volatile uint32_t hook_4g_rx_bytes_isr;
@@ -167,9 +167,11 @@ static int hook_4g_send_raw(const uint8_t *data, uint16_t len)
 		return -1;
 	}
 
-	(void)k_mutex_lock(&hook_4g_tx_mutex, K_FOREVER);
-	ret = (int)uart_manage_send_by_name("4g", data, len);
-	k_mutex_unlock(&hook_4g_tx_mutex);
+	ret = hook_4g_uart_send(data, len);
+	if (ret < 0) {
+		LOG_WRN_RATELIMIT("4G TX rejected %u byte(s): %d",
+				  (unsigned int)len, ret);
+	}
 
 	return ret;
 }
@@ -246,7 +248,7 @@ int hook_4g_http_trigger(const char *host, uint16_t port)
 	return hook_4g_send_raw((const uint8_t *)line, (uint16_t)written);
 }
 
-int32_t hook_4g_recv_callback(uint8_t *buf, uint16_t len)
+static int32_t hook_4g_recv_callback(uint8_t *buf, uint16_t len)
 {
 	uint16_t frame_len = len;
 
@@ -254,18 +256,21 @@ int32_t hook_4g_recv_callback(uint8_t *buf, uint16_t len)
 		return -1;
 	}
 
-	/* Interrupt context: only the ring and the length queue are touched. */
+	/* Async callback context: only the ring and the length queue are touched. */
 	if (k_msgq_num_free_get(&hook_4g_frame_len_queue) == 0U) {
 		hook_4g_rx_drops_isr++;
 		return -1;
 	}
 
-	if (lwrb_get_free(&hook_4g_rx_ring) < frame_len) {
+	if (ring_buf_space_get(&hook_4g_rx_ring) < frame_len) {
 		hook_4g_rx_drops_isr++;
 		return -1;
 	}
 
-	(void)lwrb_write(&hook_4g_rx_ring, buf, frame_len);
+	if (ring_buf_put(&hook_4g_rx_ring, buf, frame_len) != frame_len) {
+		hook_4g_rx_drops_isr++;
+		return -1;
+	}
 
 	if (k_msgq_put(&hook_4g_frame_len_queue, &frame_len, K_NO_WAIT) != 0) {
 		hook_4g_rx_drops_isr++;
@@ -455,6 +460,13 @@ void hook_4g_modem_hard_reset(void)
 {
 	unsigned int key;
 
+	/*
+	 * A queued command belongs to the session that is about to disappear.
+	 * Abort the active DMA transfer and drop queued frames before cycling
+	 * the rail, so nothing from the old session is emitted after boot.
+	 */
+	hook_4g_uart_flush_tx();
+
 	(void)gpio_pin_set_dt(&modem_power_gpio, 0);
 	k_msleep(HOOK_4G_MODEM_POWER_OFF_MS);
 	(void)gpio_pin_set_dt(&modem_power_gpio, 1);
@@ -466,7 +478,7 @@ void hook_4g_modem_hard_reset(void)
 	 */
 	key = irq_lock();
 	if (hook_4g_rx_ring_ready) {
-		lwrb_reset(&hook_4g_rx_ring);
+		ring_buf_reset(&hook_4g_rx_ring);
 	}
 	k_msgq_purge(&hook_4g_frame_len_queue);
 	irq_unlock(key);
@@ -910,7 +922,6 @@ int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
 		int sent = (int)hook_4g_send_raw((const uint8_t *)line,
 						 (uint16_t)strlen(line));
 
-		/* uart_manage returns UART_MANAGE_OK (0) on success. */
 		if (sent < 0) {
 			hook_4g_at_active = false;
 			hook_4g_at_wait.pending = false;
@@ -1204,9 +1215,9 @@ static void hook_4g_thread(void *a, void *b, void *c)
 						(uint16_t)sizeof(rx_block.data) :
 						frame_len;
 
-			(void)lwrb_read(&hook_4g_rx_ring, rx_block.data, take);
+			(void)ring_buf_get(&hook_4g_rx_ring, rx_block.data, take);
 			if (frame_len > take) {
-				/* Cannot happen: frames are bounded by the uart_manage
+				/* Cannot happen: frames are bounded by the async DMA
 				 * receive buffer (2048 B).
 				 */
 				hook_4g_rx_drops_isr++;
@@ -1263,13 +1274,21 @@ static struct k_thread hook_4g_thread_obj;
 
 void hook_4g_init(void)
 {
-	(void)lwrb_init(&hook_4g_rx_ring, hook_4g_rx_ring_storage,
-			(uint32_t)sizeof(hook_4g_rx_ring_storage));
+	int ret;
+
+	ring_buf_init(&hook_4g_rx_ring,
+		      (uint32_t)sizeof(hook_4g_rx_ring_storage),
+		      hook_4g_rx_ring_storage);
 	k_msgq_purge(&hook_4g_frame_len_queue);
 	hook_4g_rx_frames_isr = 0U;
 	hook_4g_rx_bytes_isr = 0U;
 	hook_4g_rx_drops_isr = 0U;
 	hook_4g_rx_ring_ready = true;
+
+	ret = hook_4g_uart_init(hook_4g_recv_callback);
+	if (ret != 0) {
+		LOG_ERR("4G UART transport init failed: %d", ret);
+	}
 
 	hook_cloud_proto_init();
 }
