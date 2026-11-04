@@ -13,45 +13,12 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/modbus/modbus.h>
-#include <zephyr/sys/util.h>
 
 #include "hook_register.h"
 
 LOG_MODULE_REGISTER(hook_modbus_slave, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define HOOK_HOST_MODBUS_NODE DT_NODELABEL(rs485_uart8)
-
-/*
- * Coil functions are not part of the hook host protocol. Keep the same small
- * shadow area the previous component exposed, instead of dereferencing an
- * absent coil table.
- */
-static uint16_t hook_host_coils[16];
-
-static int hook_slave_coil_read(uint16_t addr, bool *state)
-{
-	if ((state == NULL) || (addr >= (ARRAY_SIZE(hook_host_coils) * 16U))) {
-		return -ENOTSUP;
-	}
-
-	*state = (hook_host_coils[addr / 16U] & BIT(addr % 16U)) != 0U;
-	return 0;
-}
-
-static int hook_slave_coil_write(uint16_t addr, bool state)
-{
-	if (addr >= (ARRAY_SIZE(hook_host_coils) * 16U)) {
-		return -ENOTSUP;
-	}
-
-	if (state) {
-		hook_host_coils[addr / 16U] |= BIT(addr % 16U);
-	} else {
-		hook_host_coils[addr / 16U] &= (uint16_t)~BIT(addr % 16U);
-	}
-
-	return 0;
-}
 
 static int hook_slave_holding_read(uint16_t addr, uint16_t *reg)
 {
@@ -95,8 +62,6 @@ static int hook_slave_input_read(uint16_t addr, uint16_t *reg)
 }
 
 static struct modbus_user_callbacks hook_slave_callbacks = {
-	.coil_rd = hook_slave_coil_read,
-	.coil_wr = hook_slave_coil_write,
 	.input_reg_rd = hook_slave_input_read,
 	.holding_reg_rd = hook_slave_holding_read,
 	.holding_reg_wr = hook_slave_holding_write,

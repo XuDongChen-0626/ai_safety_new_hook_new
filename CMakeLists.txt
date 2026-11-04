@@ -29,6 +29,7 @@ add_subdirectory(app/hook_work_mode)
 add_subdirectory(app/hook_health)
 add_subdirectory(app/hook_ota)
 add_subdirectory(app/hook_params)
+add_subdirectory(app/log_manage_app)
 
 target_include_directories(app PRIVATE
 	src

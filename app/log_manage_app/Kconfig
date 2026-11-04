@@ -1,0 +1,13 @@
+menu "Application log management"
+
+config APP_LOG_MANAGE
+	bool "Enable application log management"
+	default y if LOG_RUNTIME_FILTERING
+	depends on LOG_RUNTIME_FILTERING
+	help
+	  Manage application-specific log behavior after startup. The initial
+	  implementation applies bounded per-source runtime filters after shell
+	  log backends start, because enabling a backend can reset all runtime
+	  source filters to its own default level.
+
+endmenu

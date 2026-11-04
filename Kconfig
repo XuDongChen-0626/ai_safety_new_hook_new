@@ -8,6 +8,7 @@ rsource "module/modbus_data_model/Kconfig"
 rsource "module/device_param_server/Kconfig"
 rsource "module/device_identity_service/Kconfig"
 rsource "component/offline_log_service/Kconfig"
+rsource "app/log_manage_app/Kconfig"
 
 menu "Craner AI safety hook application"
 
