@@ -10,7 +10,7 @@
  *   craner#AT+FWTIME           -> craner#FWTIME:<build date/time>
  *   craner#AT+OTAINFO          -> craner#+OTAINFO:slot0=<ver>,<hash8>[...]:slot1=...
  *                                 (+OTAHTTP:<state>,<written>,<expected>)
- *   craner#AT+OTA_CONFIRM      -> craner#OK       (confirm running image)
+ *   craner#AT+OTACONFIRM       -> craner#OK       (confirm running image)
  *   craner#AT+SYSRESET         -> cold reboot
  *   craner#AT+PARAM            -> craner#+PARAM:<n>;key=value;...
  *   craner#AT+PARAM=<key>      -> craner#+PARAM:<key>=<value>

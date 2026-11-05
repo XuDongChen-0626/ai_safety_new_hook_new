@@ -24,14 +24,14 @@
 ### 2.1 固件更新（HTTP + OTA）
 
 固件更新**不占用 0xA5 协议**，全部走 topic 1 的 `craner#AT...` 命令，
-与 `AT+OTAINFO` / `AT+OTA_CONFIRM` 同一条通道（详见 README 第 15 条）：
+与 `AT+OTAINFO` / `AT+OTACONFIRM` 同一条通道（详见 README 第 15 条）：
 
 | 命令 | 作用 |
 | --- | --- |
 | `craner#AT+OTADL=<url>` | 下载固件：4G 模块切 HTTPD 拉取 URL，流式写入 slot1，完成后切回 MQTT |
 | `craner#AT+OTATEST=<hash8>` | 安装 hash 指定的镜像（必须是 slot1 那份）+ MCUboot test 升级并重启；hash 不存在/不在 slot1 时回 `craner#AT+OTATEST ... ERROR` |
 | `craner#AT+OTAINFO` | slot0/slot1 版本 + 8 位 hash + 状态位，以及 HTTP 下载状态 |
-| `craner#AT+OTA_CONFIRM` | 确认运行中的测试镜像（1 小时内不确认会回滚） |
+| `craner#AT+OTACONFIRM` | 确认运行中的测试镜像（1 小时内不确认会回滚） |
 
 > 旧的 MQTT + Ymodem 下发链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE` 行）
 > 已删除：它与 HTTP 下载抢同一个模块、同一条链路和同一套 slot1 状态。

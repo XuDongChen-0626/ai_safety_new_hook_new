@@ -1,5 +1,5 @@
 > **已废弃（2026-09-24）**：固件更新已统一改为 **HTTP + OTA**
-> （`craner#AT+OTADL` / `AT+OTATEST` / `AT+OTA_CONFIRM`，见 README 第 15 条）。
+> （`craner#AT+OTADL` / `AT+OTATEST` / `AT+OTACONFIRM`，见 README 第 15 条）。
 > MQTT + Ymodem 这条链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE`、
 > `app/hook_ota/hook_ymodem.c`）**已整条删除**：它与 HTTP 下载抢同一个 4G
 > 模块、同一条串口链路和同一套 slot1 状态，实测两者总会互相干扰。
@@ -45,7 +45,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
                                    │ 校验签名 + 交换 slot0/slot1
                                    ▼
                              新固件运行
-                                   │ 工程师手动确认：craner#AT+OTA_CONFIRM
+                                   │ 工程师手动确认：craner#AT+OTACONFIRM
                                    │ → boot_write_img_confirmed()
                                    └ 1 h 内未确认 → ota_manager_service 冷复位
                                      → MCUboot 回退到旧固件
@@ -59,7 +59,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
 | meta 区（0x08040000）+ `active_slot/target_slot/boot_count` | MCUboot 镜像头/TLV + swap 状态（`swap-using-move`） |
 | `ota_flash_mark_pending()` | `boot_request_upgrade(BOOT_UPGRADE_TEST)` |
 | 进入 bootloader 再下载（`AT+OTABOOT`） | **不需要**：下载在应用内完成，`AT+OTABOOT` 仅保留为兼容的冷复位 |
-| `ota_flash_confirm_app()`（App 30 分钟后确认） | `ota_manager_confirm_current_image()`，**由工程师手动触发**：`AT+OTA_CONFIRM` / `hook ota confirm` |
+| `ota_flash_confirm_app()`（App 30 分钟后确认） | `ota_manager_confirm_current_image()`，**由工程师手动触发**：`AT+OTACONFIRM` / `hook ota confirm` |
 | `boot_count` 超限回退 | MCUboot test 模式 + `CONFIG_OTA_MANAGER_SERVICE_TEST_TIMEOUT_S`（默认 3600 s）自动回退 |
 | `ota_flash_crc32_*` | Ymodem 包 CRC16 + 可选整镜像 CRC32/SHA（MCUboot 启动时还会验签+SHA） |
 | `ota_flash_write()`（32B flashword 手写） | Zephyr `flash_area_write()`（`FIXED_PARTITION_ID(slot1_partition)`） |
@@ -101,7 +101,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
 | `craner#AT+OTAREQUEST` | 进入 OTA 待机状态，向 `"2,"` 通道发 Ymodem `'C'`（CRC 模式），开始接收 |
 | `craner#AT+OTACANCEL` | 放弃本次接收，发 `CAN CAN`，清空 slot1 写入上下文 |
 | `craner#AT+OTAINFO` | 返回 slot0/slot1 版本、状态（`active/pending/confirmed`） |
-| `craner#AT+OTA_CONFIRM` | **工程师手动确认**当前运行镜像（`boot_write_img_confirmed()`） |
+| `craner#AT+OTACONFIRM` | **工程师手动确认**当前运行镜像（`boot_write_img_confirmed()`） |
 | `craner#AT+OTABOOT` | 兼容保留：冷复位（新方案不需要进 bootloader 下载） |
 | `hook ota info/confirm`（本机 shell） | 与上面等价的本地调试入口 |
 | `hook usr <AT 命令>`（本机 shell） | 直接向 4G 模块透传 `usr.cn#...` 命令（如 `hook usr AT+Z`），模块应答打印在控制台 |
@@ -167,7 +167,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
 * 工具**不需要改协议**，只需把下发的文件换成 MCUboot 签名镜像；
 * 设备侧新增 `app/hook_ota`（Ymodem 接收 + 写 slot1 + `boot_request_upgrade()`）后，
   链路为：`工具 → MQTT → usr.cn → usart1 "2," → hook_ota → slot1 → MCUboot 交换/校验`；
-* 确认/回退由 MCUboot + `module/ota_manager_service` 完成，`craner#AT+OTA_CONFIRM` 等价于
+* 确认/回退由 MCUboot + `module/ota_manager_service` 完成，`craner#AT+OTACONFIRM` 等价于
   `hook ota confirm`。
 
 ## 4. 本工程已实现的 MCUboot OTA
@@ -179,7 +179,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
 | `app/hook_ota/hook_ymodem.c/.h` | Ymodem 接收状态机（由 `craner_bootloader01/application/ota_ymodem_protocol.c` 1:1 移植，协议行为不变） |
 | `app/hook_ota/hook_ota.c/.h` | OTA 会话状态机 + `OtaTask` 线程：握手、写 slot1、校验、`boot_request_upgrade()`、进度上报（**确认由工程师手动触发，无自动确认**） |
 | `app/hook_4g/hook_4g.c` | `"2,"` 通道的数据在 OTA 会话期间改投 OTA 服务（`"3,"/"4,"` 仍走云端 0xA5 协议） |
-| `app/hook_4g/hook_at.c` | `AT+OTABOOT` / `AT+OTAREQUEST` 进入接收态并回 `'C'`；`AT+OTACANCEL` 中止；`AT+OTA_CONFIRM` 手动确认；`AT+OTAINFO` 增加 `+OTASTATE` 行 |
+| `app/hook_4g/hook_at.c` | `AT+OTABOOT` / `AT+OTAREQUEST` 进入接收态并回 `'C'`；`AT+OTACANCEL` 中止；`AT+OTACONFIRM` 手动确认；`AT+OTAINFO` 增加 `+OTASTATE` 行 |
 | `src/hook_shell.c` | `hook ota start / cancel / info / confirm`，`hook status` 增加 OTA 状态 |
 | `app/hook_health/hook_health.c` | `hook_health_ota_gate()`：OTA 期间暂停任务打卡判定（避免擦除期间触发看门狗复位） |
 | `src/uart_manage_port.c` | `"4g"` 通道接收缓冲由 256 B 提升到 2048 B（一个 Ymodem 包 ≈1030 B 会作为一整帧到达） |
@@ -207,7 +207,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
         -> 延迟 CONFIG_HOOK_OTA_REBOOT_DELAY_MS 后 sys_reboot()
 8. MCUboot：校验签名 -> 交换 slot0/slot1 -> 启动新镜像（test 模式）
 9. 新镜像启动后等待**工程师手动确认**：
-   `craner#AT+OTA_CONFIRM`（或本机 `hook ota confirm`）-> boot_write_img_confirmed()
+   `craner#AT+OTACONFIRM`（或本机 `hook ota confirm`）-> boot_write_img_confirmed()
    -> 若 `CONFIG_OTA_MANAGER_SERVICE_TEST_TIMEOUT_S`（默认 3600 s = 1 h）内未确认，
       module/ota_manager_service 冷复位设备 -> MCUboot 回退到旧镜像
 ```
@@ -280,7 +280,7 @@ Ymodem 接收器 + 双 Bank Flash 管理。
 6. 手动确认（工程师确认新固件可用）：
 
    ```text
-   hook> hook craner AT+OTA_CONFIRM      # 或 hook ota confirm
+   hook> hook craner AT+OTACONFIRM       # 或 hook ota confirm
    craner#OK
    ```
 

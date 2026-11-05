@@ -119,7 +119,7 @@ config HOOK_OTA_ENABLE
 	  the MCUboot slot1 partition and verifies it. "craner#AT+OTATEST" then
 	  arms a test upgrade (boot_request_upgrade); MCUboot validates the
 	  signature, swaps the slots and rolls back unless the new image is
-	  confirmed ("craner#AT+OTA_CONFIRM").
+	  confirmed ("craner#AT+OTACONFIRM").
 
 config HOOK_OTA_REBOOT_DELAY_MS
 	int "Delay between arming the test upgrade and rebooting in milliseconds"

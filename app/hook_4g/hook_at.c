@@ -621,7 +621,7 @@ static const hook_at_cmd_entry_t hook_at_cmd_table[] = {
 	{"AT+OTADL", hook_at_cmd_ota_download},
 	{"AT+OTATEST", hook_at_cmd_ota_test},
 	{"AT+OTAINFO", hook_at_cmd_ota_info},
-	{"AT+OTA_CONFIRM", hook_at_cmd_ota_confirm},
+	{"AT+OTACONFIRM", hook_at_cmd_ota_confirm},
 	{"AT+FWTIME", hook_at_cmd_fw_time},
 	{"AT+SYSRESET", hook_at_cmd_sys_reset},
 };

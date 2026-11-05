@@ -132,7 +132,7 @@ CMake 工程名 `craner_ai_safety_hook`。
 
 > 现场走 4G/云端的固件更新统一用 **HTTP + OTA**（第 15 条）：云端在 topic 1 下发
 > `craner#AT+OTADL=<url>`，模块自己切 HTTPD 下载，写 slot1，再切回 MQTT；
-> `craner#AT+OTATEST` 安装、`craner#AT+OTA_CONFIRM` 确认。
+> `craner#AT+OTATEST` 安装、`craner#AT+OTACONFIRM` 确认。
 > 旧的 **MQTT + Ymodem** 链路（`AT+OTAREQUEST` / `AT+OTABOOT`、`+OTASTATE`、
 > `app/hook_ota/hook_ymodem.c`）**已整条删除**：它和 HTTP 下载抢同一个模块、
 > 同一条 4G 链路和同一套 slot1 状态，实测总会互相干扰。历史设计记录见
@@ -159,7 +159,7 @@ hook craner AT+OTAINFO # 本机 craner#AT 命令（等价 craner#AT+OTAINFO）
 hook ota http <url>   # 手动发起 HTTP 固件下载（等价 craner#AT+OTADL）
 hook ota test <hash>  # 按 hash 安装镜像并重启（等价 craner#AT+OTATEST=<hash>）
 hook ota info         # slot0/slot1 版本+hash 与 HTTP 下载状态
-hook ota confirm      # 确认当前镜像（等价 craner#AT+OTA_CONFIRM）
+hook ota confirm      # 确认当前镜像（等价 craner#AT+OTACONFIRM）
 hook rtc              # RTC 状态：I0x10~0x12 当前时间、H0x20~0x22 校准命令、trust
 hook rtc set 2026-09-16 14:30   # 写校准寄存器（等价上位机 Modbus 写 / 云端 0x09）
 hook reg i7           # 读输入寄存器 7（当前时间年），hook reg 113 读保持寄存器
@@ -213,7 +213,7 @@ craner#AT+FWTIME     -> craner#FWTIME:<编译时间>
 craner#AT+OTAINFO    -> craner#+OTAINFO:slot0=...,slot1=...
 craner#AT+OTADL=<url> -> craner#OK（模块切 HTTPD 下载并写入 slot1）
 craner#AT+OTATEST=<hash> -> craner#OK 后重启进该镜像（MCUboot 测试）
-craner#AT+OTA_CONFIRM -> craner#OK（工程师手动确认当前运行镜像）
+craner#AT+OTACONFIRM -> craner#OK（工程师手动确认当前运行镜像）
 craner#AT+LINK       -> craner#+LINK:<心跳统计>（=clear 清零）
 craner#AT+SYSRESET   -> 冷复位
 ```
@@ -385,7 +385,7 @@ tool/       开发工作流脚本
     读回的 `mqtt.psw` 一律显示 `***`；key 不存在/参数非法返回 `craner#+PARAMERR:<原因>`。
     资源影响（含 13/14 条）：Flash +8.4 KB、RAM +12.1 KB（app 240,884 B / 159,896 B）。
 15. **HTTP + OTA**（2026-09-22 定型）：固件操作全部走 topic 1 的 `craner#AT...` 命令，
-    **不占用 0xA5 协议**（与 `AT+OTAINFO` / `AT+OTA_CONFIRM` 同一条通道）：
+    **不占用 0xA5 协议**（与 `AT+OTAINFO` / `AT+OTACONFIRM` 同一条通道）：
 
     ```text
     craner#AT+OTADL=<url> → 设备接受（HTTP 下载：URL ≤200 B、明文、200+Content-Length）
@@ -401,7 +401,7 @@ tool/       开发工作流脚本
 
     craner#AT+OTATEST=<hash> → 按 hash 选定镜像（必须是 slot1 那份）→
                               boot_request_upgrade(TEST) + 重启 → MCUboot 安装
-    craner#AT+OTA_CONFIRM → 确认运行中的测试镜像（1 小时内不确认会回滚）
+    craner#AT+OTACONFIRM → 确认运行中的测试镜像（1 小时内不确认会回滚）
     craner#AT+OTAINFO   → slot0/slot1 版本 + 8 位 hash + 状态位 + HTTP 下载状态
     ```
 
