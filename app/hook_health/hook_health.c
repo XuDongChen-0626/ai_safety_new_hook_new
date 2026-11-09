@@ -98,7 +98,7 @@ static void hook_health_offline_first(const struct sys_health_event_status *st)
 		hook_reg_set_error_bits(ERR_BMS_READ_FAIL);
 		break;
 	case HOOK_HEALTH_EVENT_ALARM:
-		hook_reg_set_error_bits(ERR_LED_OFFLINE);
+		hook_reg_set_error_bits(ERR_ALARM_OFFLINE);
 		break;
 	case HOOK_HEALTH_EVENT_HOST_HEARTBEAT:
 		hook_reg_set_error_bits(ERR_HEARTBEAT_TIMEOUT);
@@ -122,7 +122,7 @@ static void hook_health_online_first(const struct sys_health_event_status *st)
 		hook_reg_clear_error_bits(ERR_BMS_READ_FAIL);
 		break;
 	case HOOK_HEALTH_EVENT_ALARM:
-		hook_reg_clear_error_bits(ERR_LED_OFFLINE);
+		hook_reg_clear_error_bits(ERR_ALARM_OFFLINE);
 		break;
 	case HOOK_HEALTH_EVENT_HOST_HEARTBEAT:
 		hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT);
@@ -258,7 +258,7 @@ void hook_health_alarm_supply_lost(void)
 	 * answer, so the regular 15 s "no answer" timeout would only repeat
 	 * the same conclusion later, with a misleading cause.
 	 */
-	hook_reg_set_error_bits(ERR_LED_OFFLINE);
+	hook_reg_set_error_bits(ERR_ALARM_OFFLINE);
 	sys_health_event_disable(HOOK_HEALTH_EVENT_ALARM);
 
 	LOG_WRN("alarm module offline: host heartbeat timeout, supply cut");
@@ -280,7 +280,7 @@ void hook_health_alarm_supply_restored(void)
 	 * first exchange with the re-powered module is expected immediately.
 	 */
 	sys_health_event_enable(HOOK_HEALTH_EVENT_ALARM);
-	hook_reg_clear_error_bits(ERR_LED_OFFLINE);
+	hook_reg_clear_error_bits(ERR_ALARM_OFFLINE);
 
 	LOG_INF("alarm module supervision resumed (supply restored)");
 	(void)offline_log_event(

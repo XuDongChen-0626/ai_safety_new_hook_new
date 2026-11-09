@@ -462,7 +462,7 @@ static void hook_rtc_sleep_enter(void)
 	GPIO_WRITE(alarm_power_en_gpio, 0);
 	GPIO_WRITE(pwr_led_gpio, 0);
 
-	hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT | ERR_LED_OFFLINE);
+	hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT | ERR_ALARM_OFFLINE);
 	hook_health_sleep_update(true);
 
 	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_INF,
@@ -489,8 +489,8 @@ static void hook_rtc_sleep_leave(void)
 #if defined(CONFIG_HOOK_ALARM_MODULE_ENABLE)
 	hook_alarm_set_suspend(false);
 #endif
-	/* PWD_LED is re-driven by app/hook_alarm (it mirrors the Modbus
-	 * flash-light command register).
+	/* PWD LED/supply is re-driven by app/hook_alarm after wake using the
+	 * combined light-command and siren state.
 	 */
 	hook_health_sleep_update(false);
 

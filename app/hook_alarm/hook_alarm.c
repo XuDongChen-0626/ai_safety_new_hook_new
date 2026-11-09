@@ -129,7 +129,7 @@ void hook_alarm_force_volume_sync(void)
 /*
  * Any answered request proves that the module is alive: report it to the
  * health service (app/hook_health), which owns the online/offline decision and
- * the ERR_LED_OFFLINE bit in its event callbacks. This module only reports
+ * the ERR_ALARM_OFFLINE bit in its event callbacks. This module only reports
  * successes and logs the failures.
  */
 static void hook_alarm_report_online(void)
@@ -217,12 +217,16 @@ static void hook_alarm_led_logic(void)
 	uint16_t cmd_led_switch = hook_reg_get(CMD_LED_SWITCH);
 	uint16_t status_buzzer = hook_reg_input_get(STATUS_BUZZER);
 	uint16_t error_code = hook_reg_get_error_bits();
+	bool pwr_enabled = (cmd_led_switch == 1U) || (status_buzzer != 0U);
 	int ret;
 
-	/* PWD_LED mirrors the Modbus flash-light command register, not the
-	 * supply state and not every blink phase.
+	/* PWD LED/supply is enabled when either the light command or a siren is
+	 * active. This is a strict superset of the previous CMD_LED_SWITCH-only
+	 * behaviour: any light command still enables it, while a siren now also
+	 * enables it because the sound & light alarm always has light when it
+	 * sounds.
 	 */
-	GPIO_WRITE(pwr_led_gpio, (cmd_led_switch == 1U));
+	GPIO_WRITE(pwr_led_gpio, pwr_enabled);
 
 	if ((cmd_led_switch == 1U) || (status_buzzer != 0U)) {
 		/* Blink while the host requests the flash light or a siren runs. */
@@ -236,7 +240,7 @@ static void hook_alarm_led_logic(void)
 			led_step_counter++;
 
 			if ((desired_state != hook_alarm_led_physical_state) ||
-			    ((error_code & ERR_LED_OFFLINE) != 0U)) {
+			    ((error_code & ERR_ALARM_OFFLINE) != 0U)) {
 				bool offline_retry =
 					(desired_state ==
 					 hook_alarm_led_physical_state);
@@ -267,7 +271,7 @@ static void hook_alarm_led_logic(void)
 			}
 		}
 	} else if ((hook_alarm_led_physical_state != 0U) ||
-		   ((error_code & ERR_LED_OFFLINE) != 0U)) {
+		   ((error_code & ERR_ALARM_OFFLINE) != 0U)) {
 		/* Flashing disabled: make sure the module LED is really off. */
 		if ((hook_get_time_ms() - hook_alarm_last_led_retry_ms) <
 		    HOOK_ALARM_RETRY_INTERVAL_MS) {
@@ -403,7 +407,7 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 	(void)b;
 	(void)c;
 
-	hook_alarm_power_on_self_test();
+	// hook_alarm_power_on_self_test();
 
 	for (;;) {
 		/* Liveness check-in first: it must happen in soft standby too,

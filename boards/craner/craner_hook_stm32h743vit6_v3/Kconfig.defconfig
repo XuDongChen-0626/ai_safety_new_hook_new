@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_CRANER_HOOK_STM32H743VIT6_V3
+
+config ARM_MPU
+	default y
+
+config HW_STACK_PROTECTION
+	default y
+
+config SERIAL
+	default y
+
+config CONSOLE
+	default y
+
+config UART_CONSOLE
+	default y
+
+config STDOUT_CONSOLE
+	default y
+
+config GPIO
+	default y
+
+endif # BOARD_CRANER_HOOK_STM32H743VIT6_V3

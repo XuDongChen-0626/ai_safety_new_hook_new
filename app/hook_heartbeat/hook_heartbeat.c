@@ -346,8 +346,8 @@ static void hook_heartbeat_logic(void)
 		/* The CubeMX firmware (application/app_relay.c) cut PWD_LED as well.
 		 * Drive it explicitly here so the indication is off immediately -
 		 * and also when the sound & light module handling is compiled out.
-		 * app/hook_alarm keeps mirroring CMD_LED_SWITCH (now 0), so the two
-		 * writers agree.
+		 * app/hook_alarm derives PWD from CMD_LED_SWITCH and STATUS_BUZZER
+		 * (both now 0), so the two writers agree.
 		 */
 		GPIO_WRITE(pwr_led_gpio, 0);
 

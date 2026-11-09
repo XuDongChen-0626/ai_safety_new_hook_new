@@ -16,9 +16,9 @@
 | 变更 | 本工程位置 |
 | --- | --- |
 | `CMD_LED_ON (0x0041)`：LED 常亮指令 | `src/system_def.h` |
-| `PWD_LED`(PB3) 上电默认**低**，且不再跟随声光供电 | `src/board.c`、`app/hook_heartbeat` |
+| `PWD LED/供电` 上电默认低（旧板 PB3，V3 PF4） | `src/board.c`、`app/hook_heartbeat` |
 | 灯光改为软件闪烁：亮 2 s / 灭 1 s（8×250 ms / 4×250 ms），由本机下发 `0x0041`/`0x0060` | `app/hook_alarm` |
-| `PWD_LED` 镜像 `CMD_LED_SWITCH`（声光供电由 `ALARM_POWER_EN` 单独控制） | `app/hook_alarm` |
+| `PWD LED/供电` 在 `CMD_LED_SWITCH=1` 或 `STATUS_BUZZER!=0` 时开启（声光模块主供电由 `ALARM_POWER_EN` 单独控制） | `app/hook_alarm` |
 | 声光线程周期 100 ms → 50 ms，`led_logic()` 每轮执行 | `app/hook_alarm` |
 | 上电自检：播放测试音时 `PWD_LED` 亮，自检结束熄灭 | `app/hook_alarm` |
 | 云端 0x06 工作模式读应答改为 2 字节（`[mode, error_code]`），写请求错误码改为 `0x04` | `app/hook_4g/hook_cloud_proto.c` |
@@ -71,8 +71,10 @@
 | 声光报警模块 RTU 主机（RS485） | uart7 | PE8/PE7 | 9600 | `src/modbus_rtu_master.c` |
 | 预留（旧固件已初始化未使用） | usart2 | PD5/PD6 | 9600 | 未启用 |
 
-RS485 端口使用自动收发方向转换芯片，因此 DTS 中不需要 `de-gpios`。
-板级原理图见 [docs/SCH_H743核心板4路485_2025-05-24.pdf](docs/SCH_H743核心板4路485_2025-05-24.pdf)。
+旧板 RS485 端口使用自动收发方向转换芯片，因此不需要 `de-gpios`。V3 吊钩小板
+使用 `PG11/PG10/PG9` 分别控制 USART6/UART7/UART8 的收发方向。V3 原理图见
+[SCH_主板_2026-09-10.pdf](docs/原理图/V3/SCH_主板_2026-09-10.pdf) 和
+[SCH_吊钩小板_2026-09-10.pdf](docs/原理图/V3/SCH_吊钩小板_2026-09-10.pdf)。
 
 ## 应用线程
 
@@ -120,6 +122,17 @@ mcuboot/zephyr/zephyr.hex                                  # bootloader
 ai_safety_new_hook/zephyr/zephyr.signed.bin                # 签名应用（OTA 用）
 ai_safety_new_hook/zephyr/zephyr.signed.confirmed.hex      # 已确认镜像（烧录用）
 ```
+
+V3 主板使用独立板级定义
+`boards/craner/craner_hook_stm32h743vit6_v3/`，构建时指定：
+
+```powershell
+.\dev.ps1 build -target all -pristine -board craner_hook_stm32h743vit6_v3
+```
+
+产物位于 `build/craner_hook_stm32h743vit6_v3/`。V3 会在应用线程启动前打开
+`PF3_BMQ_EN`（吊钩小板供电）和 `PA4_5V_485_EN`，RS485 方向由
+`PG11/PG10/PG9` 控制。
 
 `project_config.json` 的 `Base.ProjectName` 必须与工程目录名一致
 （`ai_safety_new_hook`），sysbuild 以应用目录名生成镜像子目录；固件/产品名仍为
@@ -321,7 +334,7 @@ tool/       开发工作流脚本
 12. **主机心跳超时与声光报警器的联动**（2026-09-18 调整）：主机心跳静默
     `HEARTBEAT_TIMEOUT_MS`（60 s）后，控制器切断报警器供电（PE5）并关闭 PWD_LED，
     并在同一步完成：
-    * 立即把声光模块上报为**离线**（置 `ERR_LED_OFFLINE` + 写一条 `alarm` 分类离线日志），
+    * 立即把声光模块上报为**离线**（置 `ERR_ALARM_OFFLINE` + 写一条 `alarm` 分类离线日志），
       原因是「主机心跳超时」，而不是再等 15 s 无应答后按“通讯超时”判离线；
     * 关闭声光模块的离线检测（`HOOK_HEALTH_EVENT_ALARM`）并**停止一切 Modbus 通讯**
       （`hook_alarm_set_suspend(true)`），不再对一个已经断电的模块反复重试
@@ -329,7 +342,7 @@ tool/       开发工作流脚本
     * 软待机退出时若仍处于该状态，`hook_health_sleep_update(false)` 不会重新打开声光检测。
 
    重新收到主机心跳后按相反顺序恢复：供电 → 恢复通讯（音量/LED 缓存已作废，第一轮重新下发
-    真实值）→ 重新打开离线检测（15 s 窗口从此刻起算）→ 清除 `ERR_LED_OFFLINE`。
+    真实值）→ 重新打开离线检测（15 s 窗口从此刻起算）→ 清除 `ERR_ALARM_OFFLINE`。
     上位机把 `HEARTBEAT_ENABLE` 写 0（关闭心跳监督）时，同样立即解除该状态。
 13. **4G 模块自动配置 / MQTT 话题组建**（2026-09-19 新增）：出厂不再需要工程师逐条敲
     `usr.cn#AT...`，`app/hook_4g_cfg/` 在每次 MCU 开机时执行一次：

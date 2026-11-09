@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_CRANER_HOOK_STM32H743VIT6_V3
+	bool "Craner AI Safety Hook V3 STM32H743VIT6"
+	select SOC_STM32H743XX

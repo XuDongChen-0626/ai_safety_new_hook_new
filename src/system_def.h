@@ -80,7 +80,7 @@ extern "C" {
 /* ------------------------------------------------------------------ */
 /* External sound & light alarm module (Modbus RTU slave 1 on uart7)   */
 /* ------------------------------------------------------------------ */
-#define SLAVE_LED_ID 1U
+#define SLAVE_ALARM_ID 1U
 
 /* External module registers */
 #define REG_LED_CTRL         0x00C2U
@@ -118,7 +118,7 @@ extern "C" {
 typedef enum {
 	ERR_NONE              = 0x00, /* normal: 1 s on / 1 s off */
 	ERR_HEARTBEAT_TIMEOUT = 0x01, /* host heartbeat lost (>60 s) */
-	ERR_LED_OFFLINE       = 0x02, /* sound & light module offline */
+	ERR_ALARM_OFFLINE     = 0x02, /* sound & light alarm module offline */
 	ERR_BMS_READ_FAIL     = 0x04, /* BMS read failure */
 } hook_error_code_t;
 

@@ -1,0 +1,6 @@
+board:
+  name: craner_hook_stm32h743vit6_v3
+  full_name: Craner AI Safety Hook V3 STM32H743VIT6
+  vendor: craner
+  socs:
+    - name: stm32h743xx

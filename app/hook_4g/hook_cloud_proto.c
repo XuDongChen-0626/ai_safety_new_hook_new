@@ -39,7 +39,7 @@ typedef struct {
 } hook_cloud_parser_t;
 
 static hook_cloud_parser_t hook_cloud_parser;
-static uint8_t hook_cloud_tx_seq;
+static uint8_t hook_cloud_request_seq;
 
 static uint16_t hook_cloud_crc16_ccitt(const uint8_t *buf, uint32_t len)
 {
@@ -73,7 +73,10 @@ static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 
 	frame_start = idx;
 	tx_buf[idx++] = HOOK_CLOUD_FRAME_MAGIC;
-	tx_buf[idx++] = hook_cloud_tx_seq++;
+	/* Echo the request SEQ so the cloud can pair this response with the
+	 * exact request even when several commands are in flight.
+	 */
+	tx_buf[idx++] = hook_cloud_request_seq;
 	tx_buf[idx++] = ack_id;
 	tx_buf[idx++] = payload_len;
 
@@ -375,8 +378,11 @@ static const hook_cloud_handler_t hook_cloud_handlers[] = {
 
 static void hook_cloud_frame_complete(void)
 {
+	uint8_t request_seq = hook_cloud_parser.header_buf[1];
 	uint8_t content_id = hook_cloud_parser.header_buf[2];
 	uint8_t data_len = hook_cloud_parser.header_buf[3];
+
+	hook_cloud_request_seq = request_seq;
 
 	for (size_t i = 0U; i < ARRAY_SIZE(hook_cloud_handlers); i++) {
 		if (hook_cloud_handlers[i].content_id == content_id) {
@@ -399,7 +405,7 @@ void hook_cloud_proto_init(void)
 {
 	memset(&hook_cloud_parser, 0, sizeof(hook_cloud_parser));
 	hook_cloud_parser.state = STATE_WAIT_START;
-	hook_cloud_tx_seq = 0U;
+	hook_cloud_request_seq = 0U;
 }
 
 void hook_cloud_proto_feed(const uint8_t *buf, uint16_t len)
@@ -473,6 +479,7 @@ void hook_cloud_proto_feed(const uint8_t *buf, uint16_t len)
 				uint8_t req_id = hook_cloud_parser.header_buf[2];
 				uint8_t err = HOOK_CLOUD_ERR_CRC_FAIL;
 
+				hook_cloud_request_seq = hook_cloud_parser.header_buf[1];
 				LOG_WRN("cloud frame CRC error (calc 0x%04X rcv 0x%04X)",
 					calculated_crc, received_crc);
 				hook_cloud_send_ack((uint8_t)(req_id | 0x80U), &err, 1U);

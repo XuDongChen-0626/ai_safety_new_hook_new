@@ -113,7 +113,7 @@ int hook_modbus_alarm_write_holding(uint16_t address, uint16_t value)
 		return -ENODEV;
 	}
 
-	return modbus_write_holding_reg(hook_alarm_iface, SLAVE_LED_ID, address,
+	return modbus_write_holding_reg(hook_alarm_iface, SLAVE_ALARM_ID, address,
 					value);
 }
 #endif

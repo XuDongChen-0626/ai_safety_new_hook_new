@@ -1,7 +1,7 @@
 {
   "Version": "1.0.0",
   "Base": {
-    "BoardName": "craner_hook_stm32h743vit6",
+    "BoardName": "craner_hook_stm32h743vit6_v3",
     "ProjectName": "ai_safety_new_hook",
     "ProductId": 71,
     "DeviceId": 71,

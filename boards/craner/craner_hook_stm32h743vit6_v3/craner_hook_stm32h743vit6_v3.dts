@@ -1,0 +1,425 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Craner AI Safety Hook V3 (tower-crane hook safety controller)
+ * MCU : STM32H743VIT6 on the H743 core board with 4x RS485
+ *       (board schematic in docs/), HSE 25 MHz, LSE 32.768 kHz
+ *
+ * Hardware: shared main board "AI Safety_General_Board_V2" plus the hook
+ * connector board (V3 schematics dated 2026-09-10):
+ *   uart5  (PB6/PB5,  115200) : shell / console / printf
+ *   usart1 (PA9/PA10, 115200) : 4G / cloud transparent module (usr.cn)
+ *   usart2 (PD5/PD6)          : laser connector on shared board; unused
+ *   usart3 (PD8/PD9)          : GPS pad; unused by the hook product
+ *   usart6 (PC6/PC7,  9600)   : 485 #2 - BMS Modbus RTU master
+ *   uart7  (PE8/PE7,  9600)   : 485 #3 - sound & light alarm module master
+ *   uart8  (PE1/PE0,  9600)   : 485 #4 - host controller Modbus RTU slave
+ *
+ * The hook connector board uses SN65LBC184 transceivers with nRE and DE tied
+ * together. PG11/PG10/PG9 drive USART6/UART7/UART8 direction
+ * (high = transmit, low = receive).
+ *
+ * Board power controls:
+ *   PF3  BMQ_EN    12V_BMQ: mandatory hook connector-board supply
+ *   PA4  5V_485_EN isolated 5 V rail for all RS485 transceivers
+ *   PE10 5V_4G_EN  4G module 5 V rail
+ *   PG2  MCU_4G_EN 4G module enable
+ *   PF4  WQ_CT     12V_WQ bridge rail, shared with the PWD LED
+ *   PF5  CCTV_CT   12V_CCTV rail used as the alarm-light supply
+ */
+
+/dts-v1/;
+#include <st/h7/stm32h743Xi.dtsi>
+#include <st/h7/stm32h743vitx-pinctrl.dtsi>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/dma/stm32_dma.h>
+
+/ {
+	model = "Craner AI Safety Hook V3 STM32H743VIT6";
+	compatible = "craner,craner-hook-stm32h743vit6-v3";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,console = &uart5;
+		zephyr,shell-uart = &uart5;
+		zephyr,dtcm = &dtcm;
+		/* Persistent device parameters (Zephyr Settings/ZMS) live on the
+		 * on-board QSPI flash, next to the persistent Modbus registers.
+		 */
+		zephyr,settings-partition = &param_store_partition;
+	};
+
+	aliases {
+		watchdog0 = &iwdg;
+		/* LEDs */
+		heartbeat-led = &heartbeat_led;
+		pwr-led = &pwr_led;
+		/* Hook actuator / power outputs */
+		alarm-power-en = &alarm_power_en;
+		modem-power = &modem_power;
+		modem-enable = &modem_enable;
+		modem-reset = &modem_reset;
+		modem-reload = &modem_reload;
+		bmq-en = &bmq_en;
+		rs485-en = &rs485_en;
+	};
+
+	gpio_outputs {
+		compatible = "gpio-leds";
+
+		/* PE3: first channel of the V3 main-board tri-colour LED. */
+		heartbeat_led: heartbeat-led {
+			gpios = <&gpioe 3 GPIO_ACTIVE_HIGH>;
+			label = "HEART_LED";
+		};
+
+		/* PF4_WQ_CT: shared bridge supply and PWD LED control. It mirrors
+		 * the Modbus flash-light command register (driven by
+		 * app/hook_alarm / app/hook_heartbeat).
+		 */
+		pwr_led: pwr-led {
+			gpios = <&gpiof 4 GPIO_ACTIVE_HIGH>;
+			label = "PWD_LED";
+		};
+
+		/* PF5_CCTV_CT: supply enable of the sound & light alarm
+		 * on the schematic, FLASH_LIGHT_POWER_EN in the .ioc). The host
+		 * heartbeat supervision cuts it after 60 s of silence.
+		 */
+		alarm_power_en: alarm-power-en {
+			gpios = <&gpiof 5 GPIO_ACTIVE_HIGH>;
+			label = "ALARM_POWER_PF5_CCTV";
+		};
+
+		/* PE10: 4G module 5 V rail. */
+		modem_power: modem-power {
+			gpios = <&gpioe 10 GPIO_ACTIVE_HIGH>;
+			label = "POWER_4G_5V";
+		};
+
+		/* PG2: separate module enable required by the V3 main board. */
+		modem_enable: modem-enable {
+			gpios = <&gpiog 2 GPIO_ACTIVE_HIGH>;
+			label = "MCU_4G_EN";
+		};
+
+		/* PD14 / PD15: 4G module reset and reload (active high). */
+		modem_reset: modem-reset {
+			gpios = <&gpiod 14 GPIO_ACTIVE_HIGH>;
+			label = "RESET_4G";
+		};
+
+		modem_reload: modem-reload {
+			gpios = <&gpiod 15 GPIO_ACTIVE_HIGH>;
+			label = "RELOAD_4G";
+		};
+
+		/* PF3: 12V_BMQ master rail. The hook connector board is powered
+		 * from this rail, so it is enabled in an early SYS_INIT before
+		 * application threads start.
+		 */
+		bmq_en: bmq-en {
+			gpios = <&gpiof 3 GPIO_ACTIVE_HIGH>;
+			label = "BMQ_EN";
+		};
+
+		/* PA4: isolated 5 V supply for all RS485 transceivers. */
+		rs485_en: rs485-en {
+			gpios = <&gpioa 4 GPIO_ACTIVE_HIGH>;
+			label = "5V_485_EN";
+		};
+	};
+
+	/* SD card (offline event log storage), FATFS mount point /SD:. */
+	fstab {
+		compatible = "zephyr,fstab";
+
+		sd_mp: sd_mp {
+			compatible = "zephyr,fstab,fatfs";
+			disk-access;
+			mount-point = "/SD:";
+		};
+	};
+};
+
+/*
+ * SDMMC1 (PC8-PC12 + PD2): same pinout as the craner general H743 PCB and the
+ * AI safety car, the SD card seat has no card-detect GPIO.
+ *
+ * Clock: PLL1Q is 48 MHz (960 MHz VCO / div-q 20), the same domain clock the
+ * car board feeds to SDMMC, so the card uses the same clk-div 2 setting.
+ */
+&sdmmc1 {
+	pinctrl-0 = <&sdmmc1_d0_pc8 &sdmmc1_d1_pc9
+		     &sdmmc1_d2_pc10 &sdmmc1_d3_pc11
+		     &sdmmc1_ck_pc12 &sdmmc1_cmd_pd2>;
+	pinctrl-names = "default";
+	disk-name = "SD";
+	bus-width = <1>;
+	clk-div = <2>;
+	status = "okay";
+};
+
+/*
+ * MCUboot layout (2 MiB internal flash, swap-using-move):
+ *   0x08000000..0x0801FFFF : MCUboot (flash bank 1)
+ *   0x08020000..0x080FFFFF : slot0 - running image (896 KiB, flash bank 1)
+ *   0x08100000..0x081BFFFF : slot1 - update image  (768 KiB, flash bank 2)
+ *   0x081C0000..0x081DFFFF : coredump partition
+ *   0x081E0000..0x081FFFFF : app storage (reserved)
+ *
+ * slot1 is deliberately aligned to the flash bank 2 boundary: the running
+ * application executes from bank 1, so an application-side OTA download can
+ * erase/program slot1 in bank 2 without stalling the core (STM32H7 read
+ * while write restriction). This is the same layout as craner_ai_safety_car.
+ *
+ * Everything that has to be written at runtime (persistent registers today,
+ * device parameters / offline logs later) lives on the on-board W25Q64 QSPI
+ * NOR flash, so the internal flash keeps its OTA layout untouched.
+ */
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x00020000>;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x00020000 0x000e0000>;
+		};
+
+		slot1_partition: partition@100000 {
+			label = "image-1";
+			reg = <0x00100000 0x000c0000>;
+		};
+
+		coredump_partition: partition@1c0000 {
+			label = "coredump-partition";
+			reg = <0x001c0000 0x00020000>;
+		};
+
+		app_storage_partition: partition@1e0000 {
+			label = "app-storage";
+			reg = <0x001e0000 0x00020000>;
+		};
+	};
+};
+
+/*
+ * On-board W25Q64JVSSIQ (8 MiB QSPI NOR, U12 on the core board schematic:
+ * PB10 NCS, PB2 CLK, PD11 IO0, PD12 IO1, PD13 IO2, PE2 IO3).
+ *
+ * Partitioning follows craner_ai_safety_car:
+ *   0x000000..0x01FFFF : device parameter store (Zephyr Settings/ZMS)
+ *   0x020000..0x021FFF : persistent Modbus registers (modbus_data_model),
+ *                        two 4 KiB banks, i.e. one NOR sector per bank
+ *   0x022000..0x7FFFFF : reserve (offline logs / future use)
+ */
+&quadspi {
+	pinctrl-0 = <&quadspi_bk1_io0_pd11
+		     &quadspi_bk1_io1_pd12
+		     &quadspi_bk1_io2_pe2
+		     &quadspi_bk1_io3_pd13
+		     &quadspi_bk1_ncs_pb10
+		     &quadspi_clk_pb2>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	w25q64: qspi-nor-flash@0 {
+		compatible = "st,stm32-qspi-nor";
+		reg = <0>;
+		/* st,stm32-qspi-nor size property is in BITS: 8 MiB = 64 Mbit. */
+		size = <DT_SIZE_M(64)>;
+		qspi-max-frequency = <40000000>;
+		spi-bus-width = <4>;
+		writeoc = "PP_1_1_4";
+		status = "okay";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			param_store_partition: partition@0 {
+				label = "param-store";
+				reg = <0x00000000 0x00020000>;
+			};
+
+			modbus_store_partition: partition@20000 {
+				label = "modbus-store";
+				reg = <0x00020000 0x00002000>;
+			};
+
+			reserve_partition: partition@22000 {
+				label = "reserve";
+				reg = <0x00022000 0x007de000>;
+			};
+		};
+	};
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+&clk_hsi48 {
+	status = "okay";
+};
+
+&clk_lse {
+	status = "okay";
+};
+
+/*
+ * Clock tree copied from the old CubeMX firmware (and from the upstream
+ * Zephyr nucleo_h743zi board, which also runs a H743 at 480 MHz):
+ *
+ *   HSE 25 MHz / div-m 5 = 5 MHz VCO input
+ *   x mul-n 192          = 960 MHz VCO (wide range)
+ *   / div-p 2            = 480 MHz SYSCLK (CPU, VOS0)
+ *   / hpre 2             = 240 MHz HCLK/AXI
+ *   / d?ppre 2           = 120 MHz APB1/2/3/4
+ *
+ * The Zephyr STM32H7 clock driver selects VOS0 before programming the PLL
+ * and re-programs the flash wait states for the new HCLK, so only the PLL
+ * and prescaler values below have to be kept consistent.
+ */
+&pll {
+	div-m = <5>;
+	mul-n = <192>;
+	div-p = <2>;
+	div-q = <20>;
+	div-r = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(480)>;
+	d1cpre = <1>;
+	hpre = <2>;
+	d1ppre = <2>;
+	d2ppre1 = <2>;
+	d2ppre2 = <2>;
+	d3ppre = <2>;
+};
+
+&pwr {
+	power-supply = "ldo";
+};
+
+&rng {
+	status = "okay";
+};
+
+/* Internal RTC on LSE. Alarm B wakes the MCU from STANDBY. */
+&rtc {
+	clocks = <&rcc STM32_CLOCK(APB4, 16)>,
+		 <&rcc STM32_SRC_LSE RTC_SEL(1)>;
+	status = "okay";
+};
+
+&bbram {
+	status = "okay";
+};
+
+&iwdg {
+	status = "okay";
+};
+
+&uart5 {
+	pinctrl-0 = <&uart5_tx_pb6 &uart5_rx_pb5>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+};
+
+/* 4G / cloud transparent module. */
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pa9 &usart1_rx_pa10>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	/* USART1 RX/TX requests are 41/42 on STM32H7. */
+	dmas = <&dmamux1 0 42 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 1 41 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
+	status = "okay";
+};
+
+/* DMA controller feeding USART1 async RX/TX. */
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+/* Laser connector on the shared board; not used by the hook product. */
+&usart2 {
+	pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6>;
+	pinctrl-names = "default";
+	current-speed = <9600>;
+	status = "disabled";
+};
+
+/* Spare port: the GPS module was removed from this product, the RTC is
+ * calibrated over Modbus RTU / MQTT instead.
+ */
+&usart3 {
+	pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "disabled";
+};
+
+/* RS485 - BMS Modbus RTU master. */
+&usart6 {
+	pinctrl-0 = <&usart6_tx_pc6 &usart6_rx_pc7>;
+	pinctrl-names = "default";
+	current-speed = <9600>;
+	status = "okay";
+
+	rs485_usart6: rs485-usart6 {
+		compatible = "zephyr,modbus-serial";
+		de-gpios = <&gpiog 11 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+/* RS485 - sound & light alarm module Modbus RTU master. */
+&uart7 {
+	pinctrl-0 = <&uart7_tx_pe8 &uart7_rx_pe7>;
+	pinctrl-names = "default";
+	current-speed = <9600>;
+	status = "okay";
+
+	rs485_uart7: rs485-uart7 {
+		compatible = "zephyr,modbus-serial";
+		de-gpios = <&gpiog 10 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+/* RS485 - host (上位机) Modbus RTU slave. */
+&uart8 {
+	pinctrl-0 = <&uart8_tx_pe1 &uart8_rx_pe0>;
+	pinctrl-names = "default";
+	current-speed = <9600>;
+	status = "okay";
+
+	rs485_uart8: rs485-uart8 {
+		compatible = "zephyr,modbus-serial";
+		de-gpios = <&gpiog 9 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};

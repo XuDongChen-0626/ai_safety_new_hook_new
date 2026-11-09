@@ -1,0 +1,14 @@
+identifier: craner_hook_stm32h743vit6_v3
+name: Craner AI Safety Hook V3 STM32H743VIT6
+type: mcu
+arch: arm
+ram: 1024
+flash: 2048
+toolchain:
+  - zephyr
+supported:
+  - uart
+  - gpio
+  - watchdog
+  - rtc
+  - flash
