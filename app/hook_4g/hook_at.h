@@ -28,6 +28,7 @@
 #ifndef HOOK_AT_H
 #define HOOK_AT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,10 +55,13 @@ int32_t hook_at_usr_handler(const uint8_t *buf, uint16_t len);
 /*
  * Forward one line to the usr.cn module without checking its content: the
  * caller passes the complete line (including the "usr.cn#" prefix) and a
- * trailing CRLF is appended when it is missing. Used by the shell for
- * terminal driven module commands such as "usr.cn#AT+Z".
+ * trailing CRLF is appended when it is missing.
+ *
+ * publish_to_mqtt must only be true for commands that originated from the
+ * MQTT command topic. Local shell commands keep their answer on the console.
  */
-int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len);
+int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len,
+			    bool publish_to_mqtt);
 
 /* Format "slot0/slot1 image state" for AT+OTAINFO and the shell. */
 int hook_at_format_image_info(char *buf, size_t buf_len);

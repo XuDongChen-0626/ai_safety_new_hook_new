@@ -572,7 +572,8 @@ static int cmd_hook_usr(const struct shell *sh, size_t argc, char **argv)
 	line[used++] = '\n';
 	line[used] = '\0';
 
-	if (hook_at_usr_forward((const uint8_t *)line, (uint16_t)used) != HOOK_AT_OK) {
+	if (hook_at_usr_forward((const uint8_t *)line, (uint16_t)used,
+				false) != HOOK_AT_OK) {
 		shell_error(sh, "could not send the usr.cn command");
 		return -EIO;
 	}

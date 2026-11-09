@@ -422,6 +422,7 @@ struct hook_4g_at_wait {
 	int result;
 	bool pending;
 	bool sensitive;
+	bool publish_to_mqtt;
 };
 
 static struct hook_4g_at_wait hook_4g_at_wait;
@@ -695,7 +696,7 @@ static bool hook_4g_at_cmd_is_sensitive(const char *cmd)
 }
 
 /* Start collecting a module AT answer (called when a usr.cn command is sent). */
-int hook_4g_at_exchange_start(void)
+int hook_4g_at_exchange_start(const char *at_cmd, bool publish_to_mqtt)
 {
 	if (hook_4g_at_wait.pending) {
 		/* A synchronous exchange owns the AT channel. */
@@ -704,6 +705,8 @@ int hook_4g_at_exchange_start(void)
 
 	hook_4g_at_len = 0U;
 	hook_4g_at_overflow = false;
+	hook_4g_at_wait.sensitive = hook_4g_at_cmd_is_sensitive(at_cmd);
+	hook_4g_at_wait.publish_to_mqtt = publish_to_mqtt;
 	hook_4g_at_timeout_ms = HOOK_4G_AT_RESPONSE_TIMEOUT_MS;
 	hook_4g_at_deadline_ms = k_uptime_get_32() + hook_4g_at_timeout_ms;
 	/* Publish the deadline before the exchange becomes visible to the 4G
@@ -791,8 +794,19 @@ static void hook_4g_at_exchange_finish(void)
 		return;
 	}
 
-	hook_4g_echo_sanitized(hook_4g_at_buf, hook_4g_at_len);
-	(void)hook_4g_mqtt_reply(hook_4g_at_buf, hook_4g_at_len);
+	if (hook_4g_at_wait.sensitive) {
+		static const uint8_t redacted[] =
+			"\r\n[4g sensitive AT answer redacted]\r\n";
+
+		(void)hook_console_send(redacted,
+					(uint16_t)(sizeof(redacted) - 1U));
+	} else {
+		hook_4g_echo_sanitized(hook_4g_at_buf, hook_4g_at_len);
+		if (hook_4g_at_wait.publish_to_mqtt) {
+			(void)hook_4g_mqtt_reply(hook_4g_at_buf,
+						 hook_4g_at_len);
+		}
+	}
 
 	if (hook_4g_at_overflow) {
 		LOG_WRN("AT answer longer than %u B, tail dropped",
@@ -909,6 +923,7 @@ int hook_4g_at_cmd(const char *cmd, char *resp, size_t resp_len,
 	hook_4g_at_wait.result = -ETIMEDOUT;
 	hook_4g_at_wait.resp[0] = '\0';
 	hook_4g_at_wait.sensitive = hook_4g_at_cmd_is_sensitive(cmd);
+	hook_4g_at_wait.publish_to_mqtt = false;
 	hook_4g_at_wait.pending = true;
 
 	hook_4g_at_len = 0U;
@@ -1140,36 +1155,11 @@ static void hook_4g_process_block(const struct hook_4g_rx_block *block)
 			(void)hook_console_send(body, body_len);
 		}
 
-		/*
-		 * "usr.cn#AT..." is the module echoing a command line we sent -
-		 * the boot provisioning probes AT+WKMOD, the cloud's own
-		 * usr.cn#AT passthrough does the same. Mirroring the echo would
-		 * put our request back on the command topic (seen as
-		 * "WH-LTE-7S1 usr.cn#AT+WKMOD" after a module restart, merged
-		 * with the boot banner by the module's 20 ms framing). The
-		 * answer to those commands arrives in its own frames and is
-		 * still mirrored, so only the echo is dropped from MQTT.
-		 * Anything else the module prefixes with usr.cn# is kept.
-		 */
-		if (!sensitive && !((body_len >= 2U) && (body[0] == 'A') &&
-		      (body[1] == 'T'))) {
-			(void)hook_4g_mqtt_reply(body, body_len);
-		}
 		return;
 	}
 
 	if (hook_4g_is_printable_text(buf, len)) {
 		hook_4g_echo_sanitized(buf, len);
-
-		/*
-		 * The boot banner stays on the console/log ("4G module boot banner
-		 * seen"): mirroring it would put "WH-LTE-7S1" on the command topic
-		 * every time the module (re)starts, where the cloud expects answers
-		 * to its commands.
-		 */
-		if (!hook_4g_contains(buf, len, "WH-LTE-7S1")) {
-			(void)hook_4g_mqtt_reply(buf, len);
-		}
 		return;
 	}
 

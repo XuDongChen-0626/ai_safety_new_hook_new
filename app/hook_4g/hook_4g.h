@@ -44,13 +44,15 @@ void hook_4g_enable_hex_echo(bool enable);
 /*
  * Arm the module AT answer collector. Called whenever a "usr.cn#..." command
  * is sent to the module: the answer is reassembled (the UART idle timer may
- * split it over several chunks) until its "OK"/"ERROR" terminator and then
- * printed on the shell and published on topic 1.
+ * split it over several chunks) until its "OK"/"ERROR" terminator.
+ *
+ * The answer is always printed on the shell. It is published on MQTT topic 1
+ * only when publish_to_mqtt is true, i.e. when the command came from MQTT.
  *
  * Returns -EBUSY when a synchronous exchange (hook_4g_at_cmd) owns the AT
  * channel, so a hand typed command cannot interleave with it.
  */
-int hook_4g_at_exchange_start(void);
+int hook_4g_at_exchange_start(const char *at_cmd, bool publish_to_mqtt);
 
 /*
  * Synchronous AT exchange: send "usr.cn#<cmd>" and wait for the module answer.

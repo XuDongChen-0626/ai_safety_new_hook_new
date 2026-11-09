@@ -686,15 +686,21 @@ int32_t hook_at_usr_handler(const uint8_t *buf, uint16_t len)
 	}
 
 	/* Forward the line unchanged to the usr.cn module. */
-	return hook_at_usr_forward(&buf[index], (uint16_t)(len - index));
+	return hook_at_usr_forward(&buf[index], (uint16_t)(len - index), true);
 }
 
-int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len)
+int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len,
+			    bool publish_to_mqtt)
 {
 	uint8_t last;
+	const uint8_t *at_cmd = line;
 
 	if ((line == NULL) || (len == 0U)) {
 		return HOOK_AT_PREFIX_NOT_MATCH;
+	}
+
+	if ((len >= 7U) && (memcmp(line, "usr.cn#", 7U) == 0)) {
+		at_cmd = &line[7];
 	}
 
 	/*
@@ -702,7 +708,8 @@ int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len)
 	 * the AT channel with synchronous exchanges, and a hand typed command
 	 * must not be sent into the middle of one.
 	 */
-	if (hook_4g_at_exchange_start() != 0) {
+	if (hook_4g_at_exchange_start((const char *)at_cmd,
+				      publish_to_mqtt) != 0) {
 		LOG_WRN("4G AT channel busy (automatic provisioning), command not sent");
 		return HOOK_AT_ACTION_FAILED;
 	}
