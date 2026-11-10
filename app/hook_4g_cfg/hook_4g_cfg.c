@@ -44,7 +44,7 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 #define CFG_CMD_MAX      160U
 #define CFG_EXPECT_MAX   128U
 #define CFG_RESP_MAX     768U
-/* 13 single entries + 3 publish + 4 subscribe topics, with headroom. */
+/* 14 single entries + 3 publish + 4 subscribe topics, with headroom. */
 #define CFG_ENTRY_MAX    22U
 
 #define CFG_BOOT_DELAY_MS         3000U
@@ -95,6 +95,7 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 #define CFG_TOPIC_PREFIX      "ai_safety"
 #define CFG_CID_SUFFIX        "-hook"
 #define CFG_WKMOD             "MQTT,NOR"
+#define CFG_UARTFT            "20"
 #define CFG_MQTTMOD           "1"
 #define CFG_MQTTCFG           "60,1"
 #define CFG_HEARTEN           "OFF"
@@ -302,6 +303,13 @@ static void cfg_build(void)
 	 * normalized form. MQTT,TRAN and every other sub-mode are rejected.
 	 */
 	cfg_add(cmd, CFG_WKMOD, "AT+WKMOD", CFG_MATCH_WKMOD);
+
+	(void)snprintk(cmd, sizeof(cmd), "AT+UARTFT=%s", CFG_UARTFT);
+	/* The 4G module defaults to 50 ms. Keep its serial frame boundary at the
+	 * documented minimum so the TX worker's 25 ms inter-frame gap separates
+	 * adjacent MQTT payloads instead of allowing the module to merge them.
+	 */
+	cfg_add(cmd, CFG_UARTFT, "AT+UARTFT", CFG_MATCH_EXACT);
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+MQTTMOD=%s", CFG_MQTTMOD);
 	cfg_add(cmd, CFG_MQTTMOD, "AT+MQTTMOD", CFG_MATCH_EXACT);
@@ -807,6 +815,7 @@ int hook_4g_cfg_enter_httpd(const char *host, uint16_t port, const char *path,
 {
 	char cmd[160];
 	char resp[256];
+	char value[32];
 	uint32_t start;
 	bool addr_ok = false;
 	int ret;
@@ -827,6 +836,16 @@ int hook_4g_cfg_enter_httpd(const char *host, uint16_t port, const char *path,
 	 */
 	if (cfg_wait_modem_wait(CFG_READY_TIMEOUT_MS, false) != 0) {
 		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	/* UARTFT is a global module setting and also governs how HTTPD turns
+	 * the request tail into a serial frame. Set it here as well when HTTP
+	 * OTA is started directly, before the normal MQTT provisioning path.
+	 */
+	(void)snprintk(cmd, sizeof(cmd), "AT+UARTFT=%s", CFG_UARTFT);
+	if (cfg_at(cmd, resp, sizeof(resp)) != 0) {
+		ret = -EIO;
 		goto out;
 	}
 
@@ -874,6 +893,14 @@ int hook_4g_cfg_enter_httpd(const char *host, uint16_t port, const char *path,
 	(void)cfg_at_timeout("AT+S", resp, sizeof(resp), CFG_CMD_TIMEOUT_MS);
 	if (cfg_wait_modem(CFG_READY_TIMEOUT_MS) != 0) {
 		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	if ((cfg_at("AT+UARTFT", resp, sizeof(resp)) != 0) ||
+	    !cfg_resp_value(resp, value, sizeof(value)) ||
+	    (strcmp(value, CFG_UARTFT) != 0)) {
+		LOG_ERR("HTTP OTA: module did not retain UARTFT=%s", CFG_UARTFT);
+		ret = -EIO;
 		goto out;
 	}
 

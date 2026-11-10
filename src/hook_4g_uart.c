@@ -29,6 +29,13 @@ LOG_MODULE_REGISTER(hook_4g_uart, CONFIG_LOG_DEFAULT_LEVEL);
 #define HOOK_4G_UART_TX_DEPTH   16U
 #define HOOK_4G_UART_TX_TIMEOUT_US (1U * USEC_PER_SEC)
 #define HOOK_4G_UART_TX_WAIT_MS 2000U
+/*
+ * WH-LTE-7S1 splits serial input into frames using a 20 ms idle period.
+ * Keep one logical queue item and the next one separate even when two
+ * producers enqueue back-to-back (for example an OTA result followed by an
+ * AT answer, which otherwise arrive at the broker as one MQTT payload).
+ */
+#define HOOK_4G_UART_TX_FRAME_GAP_MS 25U
 #define HOOK_4G_UART_RX_RESTART_DELAY_MS 10U
 #define HOOK_4G_UART_RX_RETRY_DELAY_MS 1000U
 #define HOOK_4G_UART_INVALID_BUF 0xFFU
@@ -255,6 +262,9 @@ static void hook_4g_uart_tx_thread(void *a, void *b, void *c)
 		k_mutex_unlock(&hook_4g_uart_tx_mutex);
 
 		k_mem_slab_free(&hook_4g_uart_tx_slab, item);
+
+		/* Do not let the next logical MQTT frame join this serial frame. */
+		k_msleep(HOOK_4G_UART_TX_FRAME_GAP_MS);
 	}
 }
 

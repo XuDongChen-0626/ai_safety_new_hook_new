@@ -279,8 +279,8 @@ tool/       开发工作流脚本
    （旧固件 `AutoConfig_IWDG_OptionBytes()` 已写入 `IWDG_STDBY/STOP = FREEZE`）。
    Zephyr 侧不修改选项字节，量产工装需保证该配置。
 4. **看门狗**：旧固件（含最新版 `.ioc` 已移除 IWDG1 初始化）实际上没有启用
-   看门狗，任务打卡喂狗代码也被注释；本工程用
-   `module/system_health_service` + `app/hook_health` 恢复：5 个业务线程每轮打卡，
+   看门狗，任务打卡喂狗代码也被注释；本工程已启用
+   `module/system_health_service` + `app/hook_health`：5 个业务线程每轮打卡，
    12 s 内没有完成一轮打卡则请求停止喂狗，IWDG（30 s，`CONFIG_SYS_HEALTH_WDT_TIMEOUT_MS`）
    复位系统。
    现场设备掉线（BMS / 声光 / 4G / 上位机心跳）只记录与上报错误码，不复位。
