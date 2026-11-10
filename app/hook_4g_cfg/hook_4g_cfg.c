@@ -44,8 +44,8 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 #define CFG_CMD_MAX      160U
 #define CFG_EXPECT_MAX   128U
 #define CFG_RESP_MAX     768U
-/* 10 single entries + 3 publish + 4 subscribe topics, with headroom. */
-#define CFG_ENTRY_MAX    18U
+/* 13 single entries + 3 publish + 4 subscribe topics, with headroom. */
+#define CFG_ENTRY_MAX    22U
 
 #define CFG_BOOT_DELAY_MS         3000U
 /*
@@ -337,6 +337,20 @@ static void cfg_build(void)
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+RSTIM=%s", CFG_RSTIM);
 	cfg_add(cmd, CFG_RSTIM, "AT+RSTIM", CFG_MATCH_EXACT);
+
+#if defined(CONFIG_HOOK_4G_NTP_ENABLE)
+	(void)snprintk(cmd, sizeof(cmd), "AT+NTPSVR=%s",
+		       CONFIG_HOOK_4G_NTP_SERVERS);
+	cfg_add(cmd, CONFIG_HOOK_4G_NTP_SERVERS, "AT+NTPSVR",
+		CFG_MATCH_EXACT);
+
+	cfg_add("AT+NTPEN=ON", "ON", "AT+NTPEN", CFG_MATCH_EXACT);
+
+	(void)snprintk(expect, sizeof(expect), "%d",
+		       CONFIG_HOOK_4G_NTP_MODEM_INTERVAL_MIN);
+	(void)snprintk(cmd, sizeof(cmd), "AT+NTPTM=%s", expect);
+	cfg_add(cmd, expect, "AT+NTPTM", CFG_MATCH_EXACT);
+#endif
 
 	for (size_t i = 0U; i < ARRAY_SIZE(pub_tail); i++) {
 		char topic[CFG_TOPIC_MAX];

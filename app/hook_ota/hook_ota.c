@@ -31,6 +31,7 @@
 #include "hook_health.h"
 #include "hook_4g.h"
 #include "hook_4g_cfg.h"
+#include "hook_4g_ntp.h"
 #include "hook_heartbeat.h"
 #include "hook_register.h"
 #include "hook_register_map.h"
@@ -603,6 +604,7 @@ static void hook_ota_http_run(void)
 
 	/* Mute business TX first: in HTTPD mode anything sent to the module is
 	 * appended to the HTTP request being built. */
+	hook_4g_ntp_set_paused(true);
 	hook_4g_set_http_mode(true);
 	hook_heartbeat_set_suspend(true);
 
@@ -726,6 +728,7 @@ static void hook_ota_http_run(void)
 	}
 
 	hook_4g_set_http_mode(false);
+	hook_4g_ntp_set_paused(false);
 	hook_heartbeat_set_suspend(false);
 	hook_health_ota_gate(false);
 

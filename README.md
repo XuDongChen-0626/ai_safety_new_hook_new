@@ -33,7 +33,7 @@
 | --- | --- | --- |
 | 1 | `system_health_service` 检测哪些健康指标 | 已在解答文档中给出事件表与内核级检查清单 |
 | 2 | 4G 模块每小时重启一次 | **已删除**每小时 `usr.cn#AT+Z` 保活（`app/hook_4g`） |
-| 3 | 无 GPS；RTC 改由 Modbus/MQTT 校准；RTC 寄存器拆分；定时开关机完善 | GPS/NMEA 代码全部删除；新增 `app/hook_rtc`（校准命令 H0x20~0x22 + 当前时间 I0x10~0x12 + 区间式定时开关机） |
+| 3 | 无 GPS；RTC 改由 4G NTP、Modbus/MQTT 校准；RTC 寄存器拆分；定时开关机完善 | GPS/NMEA 代码全部删除；新增 `app/hook_4g_ntp` 和 `app/hook_rtc`（校准命令 H0x20~0x22 + 当前时间 I0x10~0x12 + 区间式定时开关机） |
 | 4 | 寄存器表改用 `modbus_data_model` 子模块 | **已实现**：新增 `module/modbus_data_model` 子模块，寄存器表带名称/权限/默认值，定时开关机时间持久化到 `modbus-store` 分区 |
 | 5 | 删除无用的 `activity_led_gpio` | **已删除**（dts 节点/别名、`src/board.{c,h}`、`src/hook_task.c`） |
 
@@ -306,6 +306,9 @@ tool/       开发工作流脚本
    0x09）只写“一次性校准命令”，由 `app/hook_rtc` 线程消费后再写 RTC 并重建
    `time_manager` 信任记录；未校准（trust 无效）时定时关机与硬待机不执行。
    部分写入的命令 60 s 后自动丢弃，避免半条命令被迟到补齐。
+   4G MQTT 模式下，`app/hook_4g_ntp` 在开机后读取一次 `AT+CCLK`，之后每小时读取
+   一次；只有模块时间晚于 2026-10-01 00:00:00 UTC+8 才写 RTC。模块自身每
+   10 分钟执行一次 NTP 校时，HTTPD/OTA 期间暂停读取。
 10. **组件来源**：`module/`（system_health / time_manager / ota_manager /
     fault_dump / modbus_data_model / device_identity_service / device_param_server）
     与 `tool/zephyr-dev-workflow` 已登记为 **git submodule**

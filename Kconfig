@@ -27,14 +27,60 @@ config HOOK_4G_ENABLE
 	  Enables the usr.cn transparent bridge handling, the craner#AT command
 	  surface and the binary 0xA5 cloud protocol.
 
+config HOOK_4G_NTP_ENABLE
+	bool "Synchronize time from the 4G module NTP client"
+	default y
+	depends on HOOK_4G_ENABLE
+	depends on TIME_MANAGER_SERVICE
+	depends on TIME_SOURCE_RTC
+	help
+	  Enable the module's internal NTP client and read AT+CCLK once after
+	  boot and then once per hour. A reading is trusted only when it is later
+	  than 2026-10-01 00:00:00 UTC+8; trusted time is written to the RTC and
+	  registered as TIME_SOURCE_NTP in time_manager_service.
+
+config HOOK_4G_NTP_SERVERS
+	string "4G module NTP server list"
+	default "pool.ntp.org,ntp.aliyun.com,cn.pool.ntp.org,hk.pool.ntp.org"
+	depends on HOOK_4G_NTP_ENABLE
+	help
+	  Comma-separated list passed to AT+NTPSVR. The module accepts up to
+	  four servers.
+
+config HOOK_4G_NTP_MODEM_INTERVAL_MIN
+	int "4G module NTP synchronization interval (minutes)"
+	default 10
+	range 1 65535
+	depends on HOOK_4G_NTP_ENABLE
+	help
+	  Interval passed to AT+NTPTM. This controls how often the module itself
+	  synchronizes its internal clock with the NTP servers.
+
+config HOOK_4G_NTP_READ_INTERVAL_S
+	int "Application AT+CCLK read interval (seconds)"
+	default 3600
+	range 60 86400
+	depends on HOOK_4G_NTP_ENABLE
+	help
+	  Interval between application-side AT+CCLK reads after the initial
+	  post-boot read.
+
+config HOOK_4G_NTP_QUERY_TIMEOUT_MS
+	int "AT+CCLK query timeout (milliseconds)"
+	default 5000
+	range 1000 30000
+	depends on HOOK_4G_NTP_ENABLE
+	help
+	  Maximum time allowed for the module to answer an AT+CCLK query.
+
 config HOOK_HARD_STANDBY_ENABLE
 	bool "Allow STM32 hard standby (RTC alarm B wakeup)"
 	default y
 	help
 	  When enabled, the RTC power schedule may put the MCU into STM32
 	  STANDBY and wake it up with RTC alarm B at the configured power-on
-	  time. Requires a trusted RTC time (host Modbus RTU or cloud
-	  calibration).
+	  time. Requires trusted time from the 4G NTP client, host Modbus RTU,
+	  or cloud calibration.
 
 config HOOK_HOST_HEARTBEAT_ENABLE
 	bool "Host heartbeat supervision (alarm-light supply)"

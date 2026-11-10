@@ -25,6 +25,7 @@ add_subdirectory(app/hook_heartbeat)
 add_subdirectory(app/hook_rtc)
 add_subdirectory(app/hook_4g)
 add_subdirectory(app/hook_4g_cfg)
+add_subdirectory(app/hook_4g_ntp)
 add_subdirectory(app/hook_work_mode)
 add_subdirectory(app/hook_health)
 add_subdirectory(app/hook_ota)
@@ -40,6 +41,7 @@ target_include_directories(app PRIVATE
 	app/hook_rtc
 	app/hook_4g
 	app/hook_4g_cfg
+	app/hook_4g_ntp
 	app/hook_work_mode
 	app/hook_health
 	app/hook_ota
