@@ -12,6 +12,7 @@
 
 #include "ota_manager_service.h"
 #include "hook_4g.h"
+#include "hook_4g_uart.h"
 #include "hook_heartbeat.h"
 #include "hook_ota.h"
 #include "hook_params.h"
@@ -692,8 +693,10 @@ int32_t hook_at_usr_handler(const uint8_t *buf, uint16_t len)
 int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len,
 			    bool publish_to_mqtt)
 {
-	uint8_t last;
+	uint8_t frame[HOOK_4G_UART_TX_MAX_FRAME];
+	uint16_t frame_len;
 	const uint8_t *at_cmd = line;
+	int ret;
 
 	if ((line == NULL) || (len == 0U)) {
 		return HOOK_AT_PREFIX_NOT_MATCH;
@@ -702,6 +705,30 @@ int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len,
 	if ((len >= 7U) && (memcmp(line, "usr.cn#", 7U) == 0)) {
 		at_cmd = &line[7];
 	}
+
+	/*
+	 * Build the complete module command as one UART frame. WH-LTE-7S1 uses
+	 * a 20 ms serial framing timeout; sending the command and CRLF in two
+	 * queue items can therefore make it parse a partial AT line and answer
+	 * "+CME ERROR:58". Strip any existing terminators first so repeated
+	 * CR/LF from MQTT cannot create an extra empty command.
+	 */
+	frame_len = len;
+	while ((frame_len > 0U) &&
+	       ((line[frame_len - 1U] == '\r') ||
+		(line[frame_len - 1U] == '\n'))) {
+		frame_len--;
+	}
+
+	if ((frame_len == 0U) ||
+	    ((uint32_t)frame_len + 2U > sizeof(frame))) {
+		LOG_WRN("usr.cn command too long (%u bytes)", len);
+		return HOOK_AT_ACTION_FAILED;
+	}
+
+	memcpy(frame, line, frame_len);
+	frame[frame_len++] = '\r';
+	frame[frame_len++] = '\n';
 
 	/*
 	 * Arm the answer collector first: the automatic provisioning flow holds
@@ -714,25 +741,10 @@ int32_t hook_at_usr_forward(const uint8_t *line, uint16_t len,
 		return HOOK_AT_ACTION_FAILED;
 	}
 
-	(void)hook_4g_send(line, len);
-
-	/*
-	 * usr.cn modules terminate an AT command line with CRLF. The cloud path
-	 * forwarded the CRLF it received; a locally typed command has to get it
-	 * appended here, otherwise the module never answers.
-	 */
-	last = line[len - 1U];
-
-	if (last == '\n') {
-		/* Line already complete. */
-	} else if (last == '\r') {
-		static const uint8_t lf[] = "\n";
-
-		(void)hook_4g_send(lf, 1U);
-	} else {
-		static const uint8_t crlf[] = "\r\n";
-
-		(void)hook_4g_send(crlf, 2U);
+	ret = hook_4g_send(frame, frame_len);
+	if (ret < 0) {
+		LOG_ERR("usr.cn command could not be sent (%d)", ret);
+		return HOOK_AT_ACTION_FAILED;
 	}
 
 	return HOOK_AT_OK;

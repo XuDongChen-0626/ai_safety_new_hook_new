@@ -660,6 +660,37 @@ static bool hook_4g_at_final_error_line(const uint8_t *buf, uint16_t len)
 	return false;
 }
 
+/* True once a CME/CMS error line has a complete CR/LF terminator. */
+static bool hook_4g_at_complete_final_error_line(const uint8_t *buf,
+						 uint16_t len)
+{
+	static const char *const names[] = { "+CME ERROR", "+CMS ERROR" };
+
+	for (size_t n = 0U; n < ARRAY_SIZE(names); n++) {
+		size_t name_len = strlen(names[n]);
+
+		if ((size_t)len < name_len) {
+			continue;
+		}
+
+		for (uint16_t i = 0U;
+		     ((size_t)i + name_len) <= (size_t)len; i++) {
+			if (memcmp(&buf[i], names[n], name_len) != 0) {
+				continue;
+			}
+
+			for (uint16_t end = (uint16_t)(i + name_len);
+			     end < len; end++) {
+				if ((buf[end] == '\r') || (buf[end] == '\n')) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
 /* Classify a complete AT answer by its terminator. */
 static int hook_4g_at_tail_result(const uint8_t *buf, uint16_t len)
 {
@@ -821,6 +852,10 @@ static bool hook_4g_at_has_terminator(const uint8_t *buf, uint16_t len)
 
 	if (len < 3U) {
 		return false;
+	}
+
+	if (hook_4g_at_complete_final_error_line(buf, len)) {
+		return true;
 	}
 
 	/* Only the tail can hold the terminator of the current answer. */
