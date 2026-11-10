@@ -774,7 +774,8 @@ static void hook_4g_at_exchange_finish(void)
 		if (copy > 0U) {
 			hook_4g_at_wait.result =
 				hook_4g_at_tail_result(hook_4g_at_buf, copy);
-			if (hook_4g_at_wait.sensitive) {
+			if (hook_4g_at_wait.sensitive &&
+			    (hook_4g_at_wait.result != 0)) {
 				LOG_WRN("sensitive AT exchange failed (%d), response suppressed",
 					hook_4g_at_wait.result);
 			} else if (hook_4g_at_wait.result == -EBADMSG) {

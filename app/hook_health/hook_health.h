@@ -67,10 +67,10 @@ void hook_health_alarm_supply_lost(void);
 void hook_health_alarm_supply_restored(void);
 
 /*
- * Suspend/resume the task check-in supervision. Used by the OTA service:
- * a flash sector erase during an HTTP firmware download can keep the 4G
- * thread busy for longer than the check-in window, which must not trip the
- * watchdog.
+ * Suspend/resume task check-in and host-heartbeat supervision. Used by the
+ * OTA service: the 4G module is restarting, so a heartbeat cannot arrive,
+ * and a flash sector erase can keep the 4G thread busy for longer than the
+ * check-in window.
  */
 void hook_health_ota_gate(bool active);
 

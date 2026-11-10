@@ -298,12 +298,15 @@ void hook_health_ota_gate(bool active)
 
 	if (active) {
 		sys_health_event_disable(HOOK_HEALTH_EVENT_TASK_ALIVE);
-		LOG_INF("task check-in supervision suspended for OTA");
+		sys_health_event_disable(HOOK_HEALTH_EVENT_HOST_HEARTBEAT);
+		LOG_INF("task check-in and host heartbeat supervision suspended for OTA");
 	} else {
 		atomic_clear(&hook_health_alive_mask);
 		sys_health_event_enable(HOOK_HEALTH_EVENT_TASK_ALIVE);
 		sys_health_event_report(HOOK_HEALTH_EVENT_TASK_ALIVE);
-		LOG_INF("task check-in supervision resumed");
+		sys_health_event_enable(HOOK_HEALTH_EVENT_HOST_HEARTBEAT);
+		sys_health_event_report(HOOK_HEALTH_EVENT_HOST_HEARTBEAT);
+		LOG_INF("task check-in and host heartbeat supervision resumed");
 	}
 }
 

@@ -405,7 +405,8 @@ tool/       开发工作流脚本
 
     ```text
     craner#AT+OTADL=<url> → 设备接受（HTTP 下载：URL ≤200 B、明文、200+Content-Length）
-      → 挂起心跳监督 + 暂停线程打卡监督 + 屏蔽业务发送（HTTPD 模式下串口数据会被拼进 HTTP 请求）
+      → 挂起心跳监督 + 暂停线程打卡与 host_heartbeat 健康事件 + 屏蔽业务发送
+        （HTTPD 模式下串口数据会被拼进 HTTP 请求）
       → 模块切 HTTPD（AT+HTPTP/HTPURL/HTPSV/HTPPK/HTPTIM + AT+WKMOD=HTTPD + AT+S）
       → 串口发送请求尾 "HTTP/1.1\r\nHost:<host>\r\n\r\n" 触发 GET
       → 响应体流入（按响应头里的 Content-Length 精确接收，含签名 TLV）
