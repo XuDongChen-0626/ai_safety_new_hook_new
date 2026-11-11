@@ -31,7 +31,6 @@
 #include "hook_register_map.h"
 #include "hook_system_state.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "pwr_stm32.h"
 #include "system_def.h"
 
@@ -636,6 +635,6 @@ void hook_rtc_start(void)
 	k_thread_create(&hook_rtc_thread_obj, hook_rtc_stack,
 			K_THREAD_STACK_SIZEOF(hook_rtc_stack),
 			hook_rtc_thread, NULL, NULL, NULL,
-			OSAL_PRIO_BELOW_NORMAL, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_rtc_thread_obj, "RtcPwrSched");
 }

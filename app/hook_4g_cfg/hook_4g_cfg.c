@@ -35,7 +35,6 @@
 #include "hook_params.h"
 #include "device_param_server.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 
 LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -1195,6 +1194,6 @@ void hook_4g_cfg_start(void)
 	k_thread_create(&hook_4g_cfg_thread_obj, hook_4g_cfg_stack,
 			K_THREAD_STACK_SIZEOF(hook_4g_cfg_stack),
 			hook_4g_cfg_thread, NULL, NULL, NULL,
-			OSAL_PRIO_BELOW_NORMAL, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_4g_cfg_thread_obj, "AppCfgTask");
 }

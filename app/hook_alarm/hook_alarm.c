@@ -20,7 +20,6 @@
 #include "hook_register_map.h"
 #include "hook_system_state.h"
 #include "modbus_rtu_master.h"
-#include "osal_zephyr.h"
 #include "system_def.h"
 
 LOG_MODULE_REGISTER(hook_alarm, CONFIG_LOG_DEFAULT_LEVEL);
@@ -445,6 +444,6 @@ void hook_alarm_start(void)
 	k_thread_create(&hook_alarm_thread_obj, hook_alarm_stack,
 			K_THREAD_STACK_SIZEOF(hook_alarm_stack),
 			hook_alarm_thread, NULL, NULL, NULL,
-			OSAL_PRIO_NORMAL1, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(2), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_alarm_thread_obj, "AlarmTask");
 }

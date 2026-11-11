@@ -13,7 +13,6 @@
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "system_def.h"
 #include "system_health_service.h"
 #if defined(CONFIG_TIME_MANAGER_SERVICE)
@@ -457,6 +456,6 @@ void hook_health_task_start(void)
 	k_thread_create(&hook_health_thread_obj, hook_health_stack,
 			K_THREAD_STACK_SIZEOF(hook_health_stack),
 			hook_health_thread, NULL, NULL, NULL,
-			OSAL_PRIO_LOW, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_health_thread_obj, "HookHealth");
 }

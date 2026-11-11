@@ -18,7 +18,6 @@
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "modbus_rtu_master.h"
-#include "osal_zephyr.h"
 #include "system_def.h"
 
 LOG_MODULE_REGISTER(hook_bms, CONFIG_LOG_DEFAULT_LEVEL);
@@ -247,6 +246,6 @@ void hook_bms_start(void)
 	k_thread_create(&hook_bms_thread_obj, hook_bms_stack,
 			K_THREAD_STACK_SIZEOF(hook_bms_stack),
 			hook_bms_thread, NULL, NULL, NULL,
-			OSAL_PRIO_NORMAL, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(3), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_bms_thread_obj, "BmsMaster");
 }

@@ -19,7 +19,12 @@
     "FlashConnection": "port=SWD",
     "FlashProgrammer": "STM32_Programmer_CLI",
     "BootloaderHexPath": "{BuildDir}/mcuboot/zephyr/zephyr.hex",
-    "AppConfirmedHexPath": "{BuildDir}/{ProjectName}/zephyr/zephyr.signed.confirmed.hex"
+    "AppConfirmedHexPath": "{BuildDir}/{ProjectName}/zephyr/zephyr.signed.confirmed.hex",
+    "OptionBytes": {
+      "IWDG1_SW": "0x1",
+      "FZ_IWDG_STOP": "0x0",
+      "FZ_IWDG_SDBY": "0x0"
+    }
   },
   "Ota": {
     "Port": 115200,

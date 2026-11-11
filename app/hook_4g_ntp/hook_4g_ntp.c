@@ -25,7 +25,6 @@
 #include "hook_4g.h"
 #include "hook_4g_cfg.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "time_manager_service.h"
 #include "time_source_rtc.h"
 
@@ -399,7 +398,7 @@ void hook_4g_ntp_start(void)
 	k_thread_create(&hook_4g_ntp_thread_obj, hook_4g_ntp_stack,
 			K_THREAD_STACK_SIZEOF(hook_4g_ntp_stack),
 			hook_4g_ntp_thread, NULL, NULL, NULL,
-			OSAL_PRIO_BELOW_NORMAL1, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
 }
 
 void hook_4g_ntp_set_paused(bool paused)

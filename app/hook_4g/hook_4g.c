@@ -37,7 +37,6 @@
 #include "hook_health.h"
 #include "hook_ota.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "system_def.h"
 #include "hook_4g_uart.h"
 #include "hook_console.h"
@@ -1324,6 +1323,6 @@ void hook_4g_start(void)
 	k_thread_create(&hook_4g_thread_obj, hook_4g_stack,
 			K_THREAD_STACK_SIZEOF(hook_4g_stack),
 			hook_4g_thread, NULL, NULL, NULL,
-			OSAL_PRIO_NORMAL1, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(2), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_4g_thread_obj, "App4GTask");
 }

@@ -43,7 +43,7 @@
 | --- | --- |
 | `crane_ai_satefy_hook.ioc` / `Core/Src/{main,gpio,usart,rtc,dma}.c` | `boards/craner/craner_hook_stm32h743vit6/`（devicetree + Kconfig） |
 | `Core/Src/freertos.c` + `application/app_hook_task.c`（任务创建） | `src/main.c` + `src/hook_task.c` |
-| `cmsis_os.h` / `osDelay` / `xTaskNotify` | Zephyr kernel + `src/osal_zephyr.{h,c}` |
+| `cmsis_os.h` / `osDelay` / `xTaskNotify` | Zephyr kernel + `K_PRIO_PREEMPT()` priorities |
 | HAL UART + DMA 串口管理（`component/uart_manage`） | `src/hook_4g_uart.c`（Zephyr UART Async API + DMA；双缓冲 RX、20 ms 空闲分帧、串行化 TX 队列） |
 | `Com/am_modbus`（RTU 主/从机） | Zephyr Modbus subsystem（`src/modbus_rtu_{slave,master}.c`） |
 | `application/modbus_rtu_server_interface.c`（MB_Reg_* 寄存器） | `app/hook_modbus/`（寄存器存储 + 上位机 RTU 从机 + 两台 RTU 主机） |
@@ -277,7 +277,9 @@ tool/       开发工作流脚本
    | reserve | 0x022000 | ~8 MiB | 预留：离线日志等 |
 3. **硬待机（STANDBY）**：需要 IWDG 在 Standby/Stop 下冻结的选项字节
    （旧固件 `AutoConfig_IWDG_OptionBytes()` 已写入 `IWDG_STDBY/STOP = FREEZE`）。
-   Zephyr 侧不修改选项字节，量产工装需保证该配置。
+   `dev.ps1 flash` 现在会读取、按需写入并回读校验：
+   `IWDG1_SW=0x1`、`FZ_IWDG_STOP=0x0`、`FZ_IWDG_SDBY=0x0`。
+   调试时可用 `-skip_option_bytes` 跳过此项。
 4. **看门狗**：旧固件（含最新版 `.ioc` 已移除 IWDG1 初始化）实际上没有启用
    看门狗，任务打卡喂狗代码也被注释；本工程已启用
    `module/system_health_service` + `app/hook_health`：5 个业务线程每轮打卡，

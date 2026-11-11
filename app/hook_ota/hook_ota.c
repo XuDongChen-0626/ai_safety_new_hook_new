@@ -36,7 +36,6 @@
 #include "hook_register.h"
 #include "hook_register_map.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "ota_manager_service.h"
 #include "system_def.h"
 
@@ -888,6 +887,6 @@ void hook_ota_start(void)
 	k_thread_create(&hook_ota_http_thread_obj, hook_ota_http_stack,
 			K_THREAD_STACK_SIZEOF(hook_ota_http_stack),
 			hook_ota_http_thread, NULL, NULL, NULL,
-			OSAL_PRIO_BELOW_NORMAL, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_ota_http_thread_obj, "OtaHttp");
 }

@@ -38,7 +38,6 @@
 #include "hook_register_map.h"
 #include "hook_system_state.h"
 #include "offline_log_service.h"
-#include "osal_zephyr.h"
 #include "system_def.h"
 #include "time_manager_service.h"
 
@@ -397,6 +396,6 @@ void hook_heartbeat_start(void)
 	k_thread_create(&hook_heartbeat_thread_obj, hook_heartbeat_stack,
 			K_THREAD_STACK_SIZEOF(hook_heartbeat_stack),
 			hook_heartbeat_thread, NULL, NULL, NULL,
-			OSAL_PRIO_ABOVE_NORMAL, 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_heartbeat_thread_obj, "HostHeartbeat");
 }
