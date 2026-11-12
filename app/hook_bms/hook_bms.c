@@ -80,7 +80,7 @@ static bool hook_bms_read_remaining_times(void)
 			}
 		}
 	} else {
-		LOG_ERR_RATELIMIT("remaining discharge time read failed");
+		LOG_WRN_RATELIMIT("remaining discharge time read failed");
 	}
 
 	if (hook_bms_query(READ_PROTECT_STATUS) == 0) {
@@ -90,7 +90,7 @@ static bool hook_bms_read_remaining_times(void)
 		LOG_DBG_RATELIMIT("BMS protect status = 0x%04X",
 				  hook_bms_read_results[READ_PROTECT_STATUS]);
 	} else {
-		LOG_ERR_RATELIMIT("BMS protect status read failed");
+		LOG_WRN_RATELIMIT("BMS protect status read failed");
 	}
 
 	if (hook_bms_query(READ_REMAIN_CHARGE) == 0) {
@@ -105,7 +105,7 @@ static bool hook_bms_read_remaining_times(void)
 			}
 		}
 	} else {
-		LOG_ERR_RATELIMIT("remaining charge time read failed");
+		LOG_WRN_RATELIMIT("remaining charge time read failed");
 	}
 
 	return any_ok;
@@ -137,7 +137,7 @@ static bool hook_bms_read_slow_values(void)
 		LOG_DBG_RATELIMIT("BMS battery level = %u",
 				  hook_bms_read_results[READ_BATT_LEVEL]);
 	} else {
-		LOG_ERR_RATELIMIT("BMS battery level read failed");
+		LOG_WRN_RATELIMIT("BMS battery level read failed");
 		hook_reg_input_set(STATUS_BMS_BATTERY, 0U);
 	}
 
@@ -148,7 +148,7 @@ static bool hook_bms_read_slow_values(void)
 		LOG_DBG_RATELIMIT("BMS total voltage = %u",
 				  hook_bms_read_results[READ_TOTAL_VOLTAGE]);
 	} else {
-		LOG_ERR_RATELIMIT("BMS total voltage read failed");
+		LOG_WRN_RATELIMIT("BMS total voltage read failed");
 	}
 
 	if (hook_bms_query(READ_TOTAL_CURRENT) == 0) {
@@ -168,7 +168,7 @@ static bool hook_bms_read_slow_values(void)
 		LOG_DBG_RATELIMIT("BMS current = %d, charging = %u", current,
 				  hook_reg_input_get(STATUS_BMS_IS_CHARGE));
 	} else {
-		LOG_ERR_RATELIMIT("BMS total current read failed");
+		LOG_WRN_RATELIMIT("BMS total current read failed");
 	}
 
 	hook_reg_input_set(STATUS_BMS_REMAIN_DISCHARGE_TIME,

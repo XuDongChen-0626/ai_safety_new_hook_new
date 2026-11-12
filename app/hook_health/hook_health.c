@@ -57,7 +57,7 @@ LOG_MODULE_REGISTER(hook_health, CONFIG_LOG_DEFAULT_LEVEL);
  * gets 5 s extra margin so a heartbeat that arrives exactly on the 60 s
  * boundary is not flagged.
  */
-#define HOOK_HEALTH_HOST_TIMEOUT_MS (HEARTBEAT_TIMEOUT_MS + 5000U)
+#define HOOK_HEALTH_HOST_TIMEOUT_MS HEARTBEAT_TIMEOUT_MS
 /* Offline-log category of each field event (the SD card keeps the history). */
 static enum offline_log_category hook_health_log_category(uint16_t event)
 {

@@ -17,6 +17,9 @@ struct runtime_log_filter {
 
 static const struct runtime_log_filter filters[] = {
 	{"modbus", LOG_LEVEL_ERR},
+	{"hook_alarm", LOG_LEVEL_ERR},
+	{"hook_bms", LOG_LEVEL_ERR},
+	{"hook_health", LOG_LEVEL_ERR},
 };
 
 static void apply_runtime_log_filter(void)

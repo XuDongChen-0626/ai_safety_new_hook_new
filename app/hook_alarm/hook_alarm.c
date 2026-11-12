@@ -138,7 +138,7 @@ static void hook_alarm_report_online(void)
 
 static void hook_alarm_log_failure(const char *what)
 {
-	LOG_ERR_RATELIMIT("alarm module %s failed", what);
+	LOG_WRN_RATELIMIT("alarm module %s failed", what);
 }
 
 /*
@@ -181,7 +181,7 @@ static void hook_alarm_buzzer_logic(void)
 	if (raw_target_mode == 2U) {
 		ret = hook_alarm_write(REG_SOUND_LIGHT_CTRL, CMD_SOUND_3M);
 		if (ret != 0) {
-			LOG_ERR("3 m siren write failed");
+			LOG_WRN_RATELIMIT("3 m siren write failed");
 			return;
 		}
 		LOG_INF("3 m siren triggered");
@@ -191,7 +191,7 @@ static void hook_alarm_buzzer_logic(void)
 	} else if (raw_target_mode == 1U) {
 		ret = hook_alarm_write(REG_SOUND_LIGHT_CTRL, CMD_SOUND_7M);
 		if (ret != 0) {
-			LOG_ERR("7 m siren write failed");
+			LOG_WRN_RATELIMIT("7 m siren write failed");
 			return;
 		}
 		LOG_INF("7 m siren triggered");
@@ -201,7 +201,7 @@ static void hook_alarm_buzzer_logic(void)
 	} else {
 		ret = hook_alarm_write(REG_SOUND_STOP, CMD_SOUND_STOP);
 		if (ret != 0) {
-			LOG_ERR("sound stop write failed");
+			LOG_WRN_RATELIMIT("sound stop write failed");
 			return;
 		}
 		LOG_INF("sound stopped");

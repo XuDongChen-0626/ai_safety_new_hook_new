@@ -14,6 +14,7 @@
  */
 #include "hook_rtc.h"
 
+#include <errno.h>
 #include <time.h>
 
 #include <zephyr/device.h>
@@ -367,8 +368,44 @@ static void hook_rtc_calibration_check(void)
 
 /* --- power schedule: soft standby and STM32 STANDBY ----------------- */
 
+/*
+ * The schedule is point-triggered: now == off enters standby and now == on
+ * leaves it. Keep the stored pair distinct because an identical pair would
+ * otherwise enter standby with no later wake-up event.
+ */
+static void hook_rtc_normalize_schedule(uint16_t off_hhmm, uint16_t *on_hhmm)
+{
+	uint8_t hour;
+	uint8_t minute;
+
+	if ((on_hhmm == NULL) || (off_hhmm == 0U) ||
+	    (*on_hhmm != off_hhmm) || !hook_rtc_hhmm_valid(off_hhmm)) {
+		return;
+	}
+
+	hour = (uint8_t)((off_hhmm >> 8) & 0xFFU);
+	minute = (uint8_t)(off_hhmm & 0xFFU);
+	if (++minute >= 60U) {
+		minute = 0U;
+		hour = (uint8_t)((hour + 1U) % 24U);
+	}
+
+	*on_hhmm = (uint16_t)(((uint16_t)hour << 8) | minute);
+	hook_reg_set(POWER_ON_TIME, *on_hhmm);
+
+	LOG_WRN("[PWR] power-on time equals power-off time, wake-up moved to "
+		"%02u:%02u", hour, minute);
+	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_WRN,
+				"RTC schedule: on-time was equal to off-time "
+				"(%02u:%02u), moved one minute later",
+				hour, minute);
+}
+
 static void hook_rtc_power_init(void)
 {
+	uint16_t off_hhmm = hook_reg_get(POWER_OFF_TIME);
+	uint16_t on_hhmm = hook_reg_get(POWER_ON_TIME);
+
 	if (pwr_wakeup_from_standby()) {
 		LOG_INF("[PWR] wake-up from hard standby (RTC alarm B)");
 		pwr_clear_standby_flag();
@@ -385,12 +422,12 @@ static void hook_rtc_power_init(void)
 			RTC_CAL_YEAR, RTC_CAL_MONTH_DAY, RTC_CAL_HHMM);
 	}
 
+	hook_rtc_normalize_schedule(off_hhmm, &on_hhmm);
+
 	LOG_INF("[PWR] schedule: on %02u:%02u off %02u:%02u (Beijing), "
 		"soft=%u hard=%u",
-		hook_reg_get(POWER_ON_TIME) >> 8,
-		hook_reg_get(POWER_ON_TIME) & 0xFFU,
-		hook_reg_get(POWER_OFF_TIME) >> 8,
-		hook_reg_get(POWER_OFF_TIME) & 0xFFU,
+		on_hhmm >> 8, on_hhmm & 0xFFU,
+		off_hhmm >> 8, off_hhmm & 0xFFU,
 		hook_reg_get(SOFT_STANDBY_ENABLE),
 		hook_reg_get(STM32_STANDBY_ENABLE));
 
@@ -399,32 +436,35 @@ static void hook_rtc_power_init(void)
 
 #if defined(CONFIG_HOOK_HARD_STANDBY_ENABLE)
 /* beijing_h/beijing_m are Beijing time; the RTC alarm counters are UTC. */
-static void hook_rtc_set_alarm_b(uint8_t beijing_h, uint8_t beijing_m)
+static int hook_rtc_set_alarm_b(uint8_t beijing_h, uint8_t beijing_m)
 {
 	struct rtc_time alarm = {0};
 	uint16_t mask = RTC_ALARM_TIME_MASK_HOUR |
 			RTC_ALARM_TIME_MASK_MINUTE |
 			RTC_ALARM_TIME_MASK_SECOND;
+	int ret;
 
 	alarm.tm_hour = hook_rtc_bj_hour_to_utc(beijing_h);
 	alarm.tm_min = beijing_m;
 	alarm.tm_sec = 0;
 
-	if (rtc_alarm_set_time(HOOK_RTC_DEV, HOOK_RTC_ALARM_B_ID, mask,
-			       &alarm) != 0) {
-		LOG_ERR("[RTC] alarm B could not be armed");
-		return;
+	ret = rtc_alarm_set_time(HOOK_RTC_DEV, HOOK_RTC_ALARM_B_ID, mask,
+				 &alarm);
+	if (ret != 0) {
+		LOG_ERR("[RTC] alarm B could not be armed: %d", ret);
+		return ret;
 	}
 
 	LOG_INF("[RTC] standby alarm B armed for %02u:%02u (Beijing)",
 		beijing_h, beijing_m);
+	return 0;
 }
 
-static void hook_rtc_enter_standby(void)
+static int hook_rtc_enter_standby(void)
 {
 	if (!hook_rtc_trust_is_valid()) {
 		LOG_ERR("[PWR-ERR] RTC not trusted, standby aborted");
-		return;
+		return -EACCES;
 	}
 
 	LOG_INF("[PWR] entering STM32 hard standby");
@@ -438,11 +478,14 @@ static void hook_rtc_enter_standby(void)
 	pwr_clear_wakeup_flags();
 	pwr_clear_standby_flag();
 	pwr_enter_standby();
+
+	/* pwr_enter_standby() only returns when WFI did not enter STANDBY. */
+	return -EAGAIN;
 }
 #endif /* CONFIG_HOOK_HARD_STANDBY_ENABLE */
 
-/* Clear the alarm outputs and cut the alarm-light supply (soft standby). */
-static void hook_rtc_sleep_enter(void)
+/* Prepare a safe output-off state shared by soft and hard standby. */
+static void hook_rtc_outputs_off(void)
 {
 	hook_system_state_set_soft_standby(true);
 
@@ -463,6 +506,12 @@ static void hook_rtc_sleep_enter(void)
 
 	hook_reg_clear_error_bits(ERR_HEARTBEAT_TIMEOUT | ERR_ALARM_OFFLINE);
 	hook_health_sleep_update(true);
+}
+
+/* Clear the alarm outputs and cut the alarm-light supply (soft standby). */
+static void hook_rtc_sleep_enter(void)
+{
+	hook_rtc_outputs_off();
 
 	(void)offline_log_event(OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_INF,
 				"entered soft standby (outputs off)");
@@ -499,36 +548,28 @@ static void hook_rtc_sleep_leave(void)
 	LOG_INF("[PWR] soft standby left (alarm power on)");
 }
 
-/*
- * True while the current Beijing time is inside the sleep window. The window
- * may wrap around midnight (off > on, e.g. 21:00 -> 06:00). Using the window
- * instead of an exact minute trigger means a device that reboots inside the
- * window returns to standby immediately instead of waiting for the next
- * power-off minute.
- */
-static bool hook_rtc_in_sleep_window(uint16_t now_hhmm, uint16_t off_hhmm,
-				     uint16_t on_hhmm)
+#if defined(CONFIG_HOOK_HARD_STANDBY_ENABLE)
+static void hook_rtc_log_hard_standby_failure(int error)
 {
-	if (off_hhmm == on_hhmm) {
-		return false;
-	}
-
-	if (off_hhmm < on_hhmm) {
-		return (now_hhmm >= off_hhmm) && (now_hhmm < on_hhmm);
-	}
-
-	return (now_hhmm >= off_hhmm) || (now_hhmm < on_hhmm);
+	LOG_WRN("[PWR] hard standby not entered (%d), outputs remain off until "
+		"the scheduled power-on point or an explicit standby disable", error);
+	(void)offline_log_event(
+		OFFLINE_LOG_CAT_POWER, OFFLINE_LOG_LEVEL_WRN,
+		"hard standby not entered (%d), outputs remain off until the "
+		"scheduled power-on point or an explicit standby disable",
+		error);
 }
+#endif
 
 static void hook_rtc_schedule_check(void)
 {
 	struct tm bj;
+	static uint16_t last_trigger_hhmm = 0xFFFFU;
 	uint16_t now_hhmm;
 	uint16_t off_hhmm;
 	uint16_t on_hhmm;
 	uint16_t soft_enable;
 	uint16_t hard_enable;
-	bool should_sleep;
 
 	if (!hook_rtc_trust_is_valid()) {
 		/* Without a trusted time the schedule must not be evaluated. */
@@ -545,20 +586,15 @@ static void hook_rtc_schedule_check(void)
 	soft_enable = hook_reg_get(SOFT_STANDBY_ENABLE);
 	hard_enable = hook_reg_get(STM32_STANDBY_ENABLE);
 
-	should_sleep = hook_rtc_in_sleep_window(now_hhmm, off_hhmm, on_hhmm);
+	hook_rtc_normalize_schedule(off_hhmm, &on_hhmm);
 
-	if (!should_sleep) {
-		if (hook_system_state_is_soft_standby()) {
-			hook_rtc_sleep_leave();
-		}
+	if (!hook_rtc_hhmm_valid(off_hhmm) ||
+	    !hook_rtc_hhmm_valid(on_hhmm)) {
 		return;
 	}
 
-	/* Inside the sleep window. Hard standby (STM32 STANDBY + RTC alarm B) is
-	 * a standalone opt-in: it does not depend on SOFT_STANDBY_ENABLE, it only
-	 * reuses the same output shutdown before the MCU powers down. Soft
-	 * standby is the lighter variant when only that one is enabled.
-	 */
+	/* A host may disable standby while it is active. That is an explicit
+	 * command, not a scheduled wake-up, so restore outputs immediately. */
 	if ((soft_enable == 0U) && (hard_enable == 0U)) {
 		if (hook_system_state_is_soft_standby()) {
 			hook_rtc_sleep_leave();
@@ -567,34 +603,57 @@ static void hook_rtc_schedule_check(void)
 		return;
 	}
 
-	if (!hook_system_state_is_soft_standby()) {
-		hook_rtc_sleep_enter();
+	if (now_hhmm == last_trigger_hhmm) {
+		return;
 	}
+
+	if (now_hhmm == off_hhmm) {
+		last_trigger_hhmm = now_hhmm;
 
 #if defined(CONFIG_HOOK_HARD_STANDBY_ENABLE)
-	/* Hard standby is opt-in: it is entered as soon as the device is inside
-	 * the sleep window and is left again when RTC alarm B fires at the
-	 * configured power-on time.
-	 *
-	 * pwr_enter_standby() only returns when STANDBY could not be entered, so
-	 * the code below it is the failure path: log it and let the next schedule
-	 * check (5 s later) retry, exactly like the CubeMX firmware retried once
-	 * per second. A refused attempt therefore does not disable hard standby
-	 * for the rest of the window - e.g. a device that boots inside the window
-	 * with an untrusted RTC is re-evaluated as soon as the host or the cloud
-	 * has calibrated the time.
-	 */
-	if (hard_enable == 1U) {
-		hook_rtc_set_alarm_b((uint8_t)(on_hhmm >> 8),
-				     (uint8_t)(on_hhmm & 0xFFU));
-		hook_rtc_enter_standby();
+		/* Hard standby is an independent opt-in. pwr_enter_standby() only
+		 * returns when STANDBY could not be entered; the point trigger
+		 * has already fired, so do not run a window-style retry loop. */
+		if (hard_enable == 1U) {
+			if (!hook_system_state_is_soft_standby()) {
+				hook_rtc_outputs_off();
+			}
 
-		LOG_WRN_RATELIMIT("[PWR] hard standby not entered, retrying while "
-				  "inside the sleep window");
-	}
+			int ret = hook_rtc_set_alarm_b(
+				(uint8_t)(on_hhmm >> 8),
+				(uint8_t)(on_hhmm & 0xFFU));
+
+			if (ret == 0) {
+				ret = hook_rtc_enter_standby();
+			}
+
+			hook_rtc_log_hard_standby_failure(ret);
+		} else {
+			if (!hook_system_state_is_soft_standby()) {
+				hook_rtc_sleep_enter();
+			}
+		}
 #else
-	ARG_UNUSED(hard_enable);
+		if (!hook_system_state_is_soft_standby()) {
+			hook_rtc_sleep_enter();
+		}
+		ARG_UNUSED(hard_enable);
 #endif
+		return;
+	}
+
+	if (now_hhmm == on_hhmm) {
+		last_trigger_hhmm = now_hhmm;
+
+		/*
+		 * A boot that starts between off and on has no soft-standby
+		 * state. At the on point it is already running, so doing nothing
+		 * avoids a meaningless wake-up operation.
+		 */
+		if (hook_system_state_is_soft_standby()) {
+			hook_rtc_sleep_leave();
+		}
+	}
 }
 
 static void hook_rtc_thread(void *a, void *b, void *c)

@@ -33,7 +33,7 @@
 | --- | --- | --- |
 | 1 | `system_health_service` 检测哪些健康指标 | 已在解答文档中给出事件表与内核级检查清单 |
 | 2 | 4G 模块每小时重启一次 | **已删除**每小时 `usr.cn#AT+Z` 保活（`app/hook_4g`） |
-| 3 | 无 GPS；RTC 改由 4G NTP、Modbus/MQTT 校准；RTC 寄存器拆分；定时开关机完善 | GPS/NMEA 代码全部删除；新增 `app/hook_4g_ntp` 和 `app/hook_rtc`（校准命令 H0x20~0x22 + 当前时间 I0x10~0x12 + 区间式定时开关机） |
+| 3 | 无 GPS；RTC 改由 4G NTP、Modbus/MQTT 校准；RTC 寄存器拆分；定时开关机完善 | GPS/NMEA 代码全部删除；新增 `app/hook_4g_ntp` 和 `app/hook_rtc`（校准命令 H0x20~0x22 + 当前时间 I0x10~0x12 + 分钟点触发定时开关机） |
 | 4 | 寄存器表改用 `modbus_data_model` 子模块 | **已实现**：新增 `module/modbus_data_model` 子模块，寄存器表带名称/权限/默认值，定时开关机时间持久化到 `modbus-store` 分区 |
 | 5 | 删除无用的 `activity_led_gpio` | **已删除**（dts 节点/别名、`src/board.{c,h}`、`src/hook_task.c`） |
 
