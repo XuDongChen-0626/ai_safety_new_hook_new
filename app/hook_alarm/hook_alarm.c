@@ -406,7 +406,7 @@ static void hook_alarm_thread(void *a, void *b, void *c)
 	(void)b;
 	(void)c;
 
-	// hook_alarm_power_on_self_test();
+	hook_alarm_power_on_self_test();
 
 	for (;;) {
 		/* Liveness check-in first: it must happen in soft standby too,
