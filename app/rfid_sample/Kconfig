@@ -1,0 +1,30 @@
+menuconfig RFID_SAMPLE
+	bool "RFID shell diagnostic sample"
+	default n
+	depends on SERIAL && UART_INTERRUPT_DRIVEN && SHELL && MULTITHREADING && ZBUS
+	help
+	  Receive unsolicited RFID tag reports from the rfid-uart devicetree
+	  alias. Parse the 17-byte and 25-byte layouts and expose a diagnostic
+	  zbus channel and shell commands for legacy inventory start/stop and
+	  configured-mode queries. Tag checksums are NOT verified; control
+	  replies are BCC-checked. No commands are sent automatically.
+	  This does not implement tag presence, Modbus, MQTT or persistence.
+
+if RFID_SAMPLE
+
+config RFID_SAMPLE_FRAME_TIMEOUT_MS
+	int "Maximum partial-frame age and idle timeout (ms)"
+	default 250
+	range 50 5000
+
+config RFID_SAMPLE_RX_QUEUE_DEPTH
+	int "UART receive queue depth (blocks of up to 32 bytes)"
+	default 64
+	range 8 256
+
+config RFID_SAMPLE_RX_STACK_SIZE
+	int "RFID receive thread stack size"
+	default 2048
+	range 1024 8192
+
+endif

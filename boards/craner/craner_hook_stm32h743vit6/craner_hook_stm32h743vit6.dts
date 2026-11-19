@@ -44,6 +44,7 @@
 
 	aliases {
 		watchdog0 = &iwdg;
+		rfid-uart = &uart8;
 		/* LEDs */
 		heartbeat-led = &heartbeat_led;
 		pwr-led = &pwr_led;
@@ -391,6 +392,6 @@
 
 	rs485_uart8: rs485-uart8 {
 		compatible = "zephyr,modbus-serial";
-		status = "okay";
+		status = "disabled";
 	};
 };

@@ -31,6 +31,7 @@ add_subdirectory(app/hook_health)
 add_subdirectory(app/hook_ota)
 add_subdirectory(app/hook_params)
 add_subdirectory(app/log_manage_app)
+add_subdirectory(app/rfid_sample)
 
 target_include_directories(app PRIVATE
 	src

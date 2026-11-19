@@ -9,8 +9,15 @@ rsource "module/device_param_server/Kconfig"
 rsource "module/device_identity_service/Kconfig"
 rsource "component/offline_log_service/Kconfig"
 rsource "app/log_manage_app/Kconfig"
+rsource "app/rfid_sample/Kconfig"
 
 menu "Craner AI safety hook application"
+
+config HOOK_HOST_MODBUS_ENABLE
+	bool "Enable host Modbus RTU slave"
+	default y
+	help
+	  Enable the host-controller Modbus RTU slave on UART8.
 
 config HOOK_MODBUS_SLAVE_ID
 	int "Modbus RTU slave address on the host RS485 bus (uart8)"
