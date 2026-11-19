@@ -6,3 +6,4 @@ build/
 *.rej
 *.log
 keys/
+tmp/
