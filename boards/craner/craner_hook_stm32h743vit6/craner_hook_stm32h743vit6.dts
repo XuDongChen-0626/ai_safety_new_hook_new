@@ -39,7 +39,7 @@
 		/* Persistent device parameters (Zephyr Settings/ZMS) live on the
 		 * on-board QSPI flash, next to the persistent Modbus registers.
 		 */
-		zephyr,settings-partition = &param_store_partition;
+		zephyr,settings-partition = &app_storage_partition;
 	};
 
 	aliases {
