@@ -209,7 +209,7 @@
 		     &quadspi_bk1_ncs_pb10
 		     &quadspi_clk_pb2>;
 	pinctrl-names = "default";
-	status = "okay";
+	status = "disabled";
 
 	w25q64: qspi-nor-flash@0 {
 		compatible = "st,stm32-qspi-nor";
@@ -219,7 +219,7 @@
 		qspi-max-frequency = <40000000>;
 		spi-bus-width = <4>;
 		writeoc = "PP_1_1_4";
-		status = "okay";
+		status = "disabled";
 
 		partitions {
 			compatible = "fixed-partitions";
