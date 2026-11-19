@@ -27,6 +27,15 @@ config HOOK_4G_ENABLE
 	  Enables the usr.cn transparent bridge handling, the craner#AT command
 	  surface and the binary 0xA5 cloud protocol.
 
+config HOOK_4G_AUTO_RECONFIGURE
+	bool "Automatically reconfigure the 4G module at boot"
+	default n
+	depends on HOOK_4G_ENABLE
+	help
+	  Compare and, when necessary, rewrite the 4G module configuration at
+	  boot. Leave this disabled to preserve the module's existing settings.
+	  Manual provisioning remains available through the shell command.
+
 config HOOK_4G_NTP_ENABLE
 	bool "Synchronize time from the 4G module NTP client"
 	default y

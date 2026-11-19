@@ -1171,6 +1171,7 @@ int hook_4g_cfg_format_summary(char *buf, size_t buf_len)
 	return written;
 }
 
+#if defined(CONFIG_HOOK_4G_AUTO_RECONFIGURE)
 static void hook_4g_cfg_thread(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -1186,14 +1187,17 @@ static void hook_4g_cfg_thread(void *a, void *b, void *c)
 /* 4 KiB: the flow nests two 768 B answer buffers (86% used at 3 KiB). */
 K_THREAD_STACK_DEFINE(hook_4g_cfg_stack, 4096);
 static struct k_thread hook_4g_cfg_thread_obj;
+#endif
 
 void hook_4g_cfg_start(void)
 {
 	cfg_build();
 
+#if defined(CONFIG_HOOK_4G_AUTO_RECONFIGURE)
 	k_thread_create(&hook_4g_cfg_thread_obj, hook_4g_cfg_stack,
 			K_THREAD_STACK_SIZEOF(hook_4g_cfg_stack),
 			hook_4g_cfg_thread, NULL, NULL, NULL,
 			K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 	k_thread_name_set(&hook_4g_cfg_thread_obj, "AppCfgTask");
+#endif
 }
