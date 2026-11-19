@@ -15,6 +15,40 @@
 
 LOG_MODULE_REGISTER(hook_board, CONFIG_LOG_DEFAULT_LEVEL);
 
+#if DT_HAS_ALIAS(power_3v)
+static const struct gpio_dt_spec power_3v_gpio = GPIO_SPEC_ALIAS(power_3v);
+#endif
+#if DT_HAS_ALIAS(power_5v)
+static const struct gpio_dt_spec power_5v_gpio = GPIO_SPEC_ALIAS(power_5v);
+#endif
+#if DT_HAS_ALIAS(modem_enable)
+static const struct gpio_dt_spec modem_enable_gpio = GPIO_SPEC_ALIAS(modem_enable);
+#endif
+#if DT_HAS_ALIAS(bmq_en)
+static const struct gpio_dt_spec bmq_en_gpio = GPIO_SPEC_ALIAS(bmq_en);
+#endif
+#if DT_HAS_ALIAS(rs485_en)
+static const struct gpio_dt_spec rs485_en_gpio = GPIO_SPEC_ALIAS(rs485_en);
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(rs485_usart6))
+#if DT_NODE_HAS_PROP(DT_NODELABEL(rs485_usart6), de_gpios)
+static const struct gpio_dt_spec rs485_usart6_de_gpio =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(rs485_usart6), de_gpios);
+#endif
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(rs485_uart7))
+#if DT_NODE_HAS_PROP(DT_NODELABEL(rs485_uart7), de_gpios)
+static const struct gpio_dt_spec rs485_uart7_de_gpio =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(rs485_uart7), de_gpios);
+#endif
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(rs485_uart8))
+#if DT_NODE_HAS_PROP(DT_NODELABEL(rs485_uart8), de_gpios)
+static const struct gpio_dt_spec rs485_uart8_de_gpio =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(rs485_uart8), de_gpios);
+#endif
+#endif
+
 /*
  * Initial output levels copied from crane_ai_satefy_hook.ioc / MX_GPIO_Init():
  *   3V3 / 5V / 4G rails on where the board has controllable switches, heart
@@ -26,14 +60,6 @@ LOG_MODULE_REGISTER(hook_board, CONFIG_LOG_DEFAULT_LEVEL);
  */
 void board_gpio_init(void)
 {
-	/* Power rails / enables: active at boot. */
-#if DT_HAS_ALIAS(power_3v)
-	(void)gpio_pin_configure_dt(&power_3v_gpio, GPIO_OUTPUT_ACTIVE);
-#endif
-#if DT_HAS_ALIAS(power_5v)
-	(void)gpio_pin_configure_dt(&power_5v_gpio, GPIO_OUTPUT_ACTIVE);
-#endif
-
 	/* Alarm-light supply on and heart LED on (the LED animation takes over). */
 	(void)gpio_pin_configure_dt(&alarm_power_en_gpio, GPIO_OUTPUT_ACTIVE);
 	(void)gpio_pin_configure_dt(&heartbeat_led_gpio, GPIO_OUTPUT_ACTIVE);
@@ -48,16 +74,18 @@ void board_gpio_init(void)
 	(void)gpio_pin_configure_dt(&modem_reload_gpio, GPIO_OUTPUT_INACTIVE);
 }
 
-/*
- * V3 has mandatory field-power enables that must be asserted before any
- * application thread or device probing starts. PF3_BMQ_EN powers the hook
- * connector board itself, so leaving it in its reset state makes every
- * downstream device inaccessible.
- *
- * The old board has no such aliases; its rails continue to be enabled by
- * board_gpio_init() from main().
- */
-static int board_early_power_init(void)
+static void board_v2_fixed_power_init(void)
+{
+	/* Power rails / enables: active at boot. */
+#if DT_HAS_ALIAS(power_3v)
+	(void)gpio_pin_configure_dt(&power_3v_gpio, GPIO_OUTPUT_ACTIVE);
+#endif
+#if DT_HAS_ALIAS(power_5v)
+	(void)gpio_pin_configure_dt(&power_5v_gpio, GPIO_OUTPUT_ACTIVE);
+#endif
+}
+
+static int board_rs485_direction_init(void)
 {
 #if DT_NODE_EXISTS(DT_NODELABEL(rs485_usart6))
 #if DT_NODE_HAS_PROP(DT_NODELABEL(rs485_usart6), de_gpios)
@@ -92,6 +120,11 @@ static int board_early_power_init(void)
 #endif
 #endif
 
+	return 0;
+}
+
+static int board_v3_fixed_power_init(void)
+{
 #if DT_HAS_ALIAS(bmq_en)
 	if (!gpio_is_ready_dt(&bmq_en_gpio)) {
 		LOG_ERR("BMQ power enable GPIO is not ready");
@@ -116,6 +149,11 @@ static int board_early_power_init(void)
 	(void)gpio_pin_configure_dt(&modem_enable_gpio, GPIO_OUTPUT_ACTIVE);
 #endif
 
+	return 0;
+}
+
+static int board_modem_power_init(void)
+{
 	if (!gpio_is_ready_dt(&modem_power_gpio)) {
 		LOG_ERR("4G module power GPIO is not ready");
 		return -ENODEV;
@@ -123,6 +161,33 @@ static int board_early_power_init(void)
 	(void)gpio_pin_configure_dt(&modem_power_gpio, GPIO_OUTPUT_ACTIVE);
 
 	return 0;
+}
+
+/*
+ * V3 has mandatory field-power enables that must be asserted before any
+ * application thread or device probing starts. PF3_BMQ_EN powers the hook
+ * connector board itself, so leaving it in its reset state makes every
+ * downstream device inaccessible.
+ *
+ * The old board has no such aliases; its rails continue to be enabled by
+ * board_gpio_init() from main().
+ */
+static int board_early_power_init(void)
+{
+	int ret = board_rs485_direction_init();
+
+	if (ret < 0) {
+		return ret;
+	}
+
+	board_v2_fixed_power_init();
+
+	ret = board_v3_fixed_power_init();
+	if (ret < 0) {
+		return ret;
+	}
+
+	return board_modem_power_init();
 }
 
 SYS_INIT(board_early_power_init, POST_KERNEL, 45);
