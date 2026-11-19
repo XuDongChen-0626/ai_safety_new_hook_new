@@ -1,13 +1,13 @@
 {
   "Version": "1.0.0",
   "Base": {
-    "BoardName": "craner_hook_stm32h743vit6_v3",
-    "ProjectName": "ai_safety_new_hook",
-    "ProductId": 71,
-    "DeviceId": 71,
+    "BoardName": "craner_hook_stm32h743vit6",
+    "ProjectName": "ai_safety_new_hook_new",
+    "ProductId": 10,
+    "DeviceId": 10,
     "OtaTarget": "COM7",
-    "ZephyrBase": "../../zephyr",
-    "ZephyrSdkInstallDir": "../../zephyr-sdk-1.0.1"
+    "ZephyrBase": "../zephyr_ws/zephyrproject/zephyr",
+    "ZephyrSdkInstallDir": "../zephyr_ws/zephyr-sdk-1.0.1/zephyr-sdk-1.0.1"
   },
   "Build": {
     "BuildDir": "build/{BoardName}",
