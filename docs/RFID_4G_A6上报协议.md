@@ -211,6 +211,7 @@ A6 01 01 00 08 00 01 00 11 02 55 43 42 01 F3 67
 
 | 产品 | Device | MQTT Topic | 4G发布通道 | 上报周期 | QoS | Retain | 单帧最大标签数 | 空窗口上报 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 产品10 | `ais504` | `ai_safety/ais504/rfid/hook/server` | 4 | 5秒 | 2 | 0 | 10 | 是，`tag_count=0` |
+| 产品18 | `ais504` | `ai_safety/ais504/rfid/hook/server` | 4 | 5秒 | 2 | 0 | 10 | 是，`tag_count=0` |
+| 产品101 | `ais503` | `ai_safety/ais503/rfid/hook/server` | 4 | 5秒 | 2 | 0 | 10 | 是，`tag_count=0` |
 
 设备MCU内部使用`"4,"`选择4G发布通道，该前缀由4G模块消费，不属于MQTT Payload。上位机接收到的Payload始终从`0xA6`开始。

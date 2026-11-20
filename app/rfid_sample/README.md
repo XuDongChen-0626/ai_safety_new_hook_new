@@ -1,6 +1,6 @@
 # RFID 读取诊断
 
-当前仅接入产品 10 / V2：USART2，PD5 TX / PD6 RX，RS485 自动方向，9600 / 8N1。读取采用 [REW 协议第 8 章](../../docs/hardware_v2.0/datasheet/RFID协议文档.pdf) 的 `0x39` 格式，支持手动开始/停止盘点和查询配置模式；不写设备配置、不改串口参数，V3 不接入。MCU 引脚不等于外部连接器针脚编号，接线应按实际板卡确认。
+当前仅接入产品 18 / V2：USART2，PD5 TX / PD6 RX，RS485 自动方向，9600 / 8N1。读取采用 [REW 协议第 8 章](../../docs/hardware_v2.0/datasheet/RFID协议文档.pdf) 的 `0x39` 格式，支持手动开始/停止盘点和查询配置模式；不写设备配置、不改串口参数，V3 不接入。MCU 引脚不等于外部连接器针脚编号，接线应按实际板卡确认。
 
 数据路径为 UART 接收 → 独立协议解析器 → 接收线程发布 `rfid_sample_diagnostic_chan` → Shell 消费者。接收随应用启动常驻，当前应用组帧超时默认 250 ms；仅持续打印默认关闭。显示命令读取公共状态 API 和 zbus 消息；设备控制命令通过公共 API 提交，经协议编码器和 UART 发出。Shell 不直接操作串口或解析器内部状态。模式回复走独立响应回调，不作为标签发布，不覆盖最新标签。
 
@@ -23,7 +23,7 @@ app/rfid_sample/
     └── rfid_sample_protocol.h
 ```
 
-`driver/` 中 UART 传输与纯 C 协议解析分别实现，不含发布线程或业务。接收线程、诊断消息和状态接口位于 `sample/`，Shell 消费者位于 `shell/`。模块根目录集中维护一份 CMake/Kconfig，产品 10 通过 `CONFIG_ZBUS=y` 和 `CONFIG_RFID_SAMPLE=y` 启用；当前仍是主仓库普通目录，不是 Git 子模块。协议测试位于 `tests/rfid_protocol/`，只依赖纯 C 协议文件。
+`driver/` 中 UART 传输与纯 C 协议解析分别实现，不含发布线程或业务。接收线程、诊断消息和状态接口位于 `sample/`，Shell 消费者位于 `shell/`。模块根目录集中维护一份 CMake/Kconfig，产品 18 和产品 101 通过 `CONFIG_ZBUS=y` 和 `CONFIG_RFID_SAMPLE=y` 启用；当前仍是主仓库普通目录，不是 Git 子模块。协议测试位于 `tests/rfid_protocol/`，只依赖纯 C 协议文件。
 
 ## 使用
 
@@ -107,4 +107,4 @@ Shell listener 在发布线程上下文仅检查原子开关/会话代数，将�
 
 ## 验证状态
 
-上一版产品 10 / V2 的应用及 MCUboot 已通过 `./dev.ps1 build -target all -pristine` 编译；本次 Shell 命令和 UART 发送/模式回复扩展仅做静态检查，未重新编译。已补充请求编码和模式响应测试源码，未执行协议测试程序或实机收发验证。后续需验证连续帧、拆包/粘包、杂字节、长度错误、超时重同步、时间字段、输出开关切换、慢终端队列溢出、命令发送超时、模式回复校验及查询对盘点的影响。
+产品 18 / V2 的应用及 MCUboot 已通过 `./dev.ps1 build -target all -pristine` 编译；本次 Shell 命令和 UART 发送/模式回复扩展仅做静态检查，未重新编译。已补充请求编码和模式响应测试源码，未执行协议测试程序或实机收发验证。后续需验证连续帧、拆包/粘包、杂字节、长度错误、超时重同步、时间字段、输出开关切换、慢终端队列溢出、命令发送超时、模式回复校验及查询对盘点的影响。
