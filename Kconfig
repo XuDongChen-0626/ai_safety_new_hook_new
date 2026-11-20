@@ -10,8 +10,16 @@ rsource "module/device_identity_service/Kconfig"
 rsource "component/offline_log_service/Kconfig"
 rsource "app/log_manage_app/Kconfig"
 rsource "app/rfid_sample/Kconfig"
+rsource "app/rfid_uplink/Kconfig"
 
 menu "Craner AI safety hook application"
+
+config HOOK_DEFAULT_DEVICE_NO
+	string "Default factory device number"
+	default ""
+	help
+	  Product default for device.no. Leave empty to use the hardware-derived
+	  short ID. MQTT topics prepend "ais" to this value.
 
 config HOOK_HOST_MODBUS_ENABLE
 	bool "Enable host Modbus RTU slave"

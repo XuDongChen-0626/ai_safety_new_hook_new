@@ -1,0 +1,26 @@
+menuconfig RFID_UPLINK
+	bool "RFID periodic 4G uplink"
+	default n
+	depends on RFID_SAMPLE && HOOK_4G_ENABLE && ZBUS
+	help
+	  Aggregate unique RFID tags and publish one A6 frame on MQTT channel 4
+	  every five seconds, including empty windows.
+
+if RFID_UPLINK
+
+config RFID_UPLINK_PERIOD_MS
+	int "RFID uplink period (ms)"
+	default 5000
+	range 1000 60000
+
+config RFID_UPLINK_EVENT_QUEUE_DEPTH
+	int "RFID uplink event queue depth"
+	default 64
+	range 8 256
+
+config RFID_UPLINK_STACK_SIZE
+	int "RFID uplink thread stack size"
+	default 3072
+	range 2048 8192
+
+endif

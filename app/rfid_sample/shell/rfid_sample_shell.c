@@ -9,6 +9,10 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
+#if defined(CONFIG_RFID_UPLINK)
+#include "rfid_uplink.h"
+#endif
+
 #define RFID_SAMPLE_SHELL_QUEUE_DEPTH 8U
 #define RFID_SAMPLE_SHELL_STACK_SIZE 2048U
 #define RFID_SAMPLE_SHELL_PRIORITY 12
@@ -26,6 +30,22 @@ static atomic_t rfid_sample_shell_enabled;
 static atomic_t rfid_sample_shell_session;
 static atomic_t rfid_sample_shell_drops;
 static const struct shell *rfid_sample_shell_output;
+
+static void rfid_sample_shell_hex(const uint8_t *bytes, size_t count,
+				char *text, size_t capacity)
+{
+	static const char digits[] = "0123456789ABCDEF";
+	size_t used = 0U;
+
+	if (capacity == 0U) {
+		return;
+	}
+	for (size_t i = 0U; (i < count) && (capacity - used >= 3U); i++) {
+		text[used++] = digits[bytes[i] >> 4];
+		text[used++] = digits[bytes[i] & 0x0fU];
+	}
+	text[used] = '\0';
+}
 
 static void rfid_sample_shell_observe(const struct zbus_channel *chan)
 {
@@ -51,61 +71,14 @@ static void rfid_sample_shell_observe(const struct zbus_channel *chan)
 ZBUS_LISTENER_DEFINE(rfid_sample_shell_listener, rfid_sample_shell_observe);
 ZBUS_CHAN_ADD_OBS(rfid_sample_diagnostic_chan, rfid_sample_shell_listener, 0);
 
-static void rfid_sample_shell_hex(const uint8_t *bytes, size_t count,
-				char *text, size_t capacity)
-{
-	static const char digits[] = "0123456789ABCDEF";
-	size_t used = 0U;
-
-	if (capacity == 0U) {
-		return;
-	}
-
-	for (size_t i = 0U; (i < count) && (capacity - used >= 3U); i++) {
-		text[used++] = digits[bytes[i] >> 4];
-		text[used++] = digits[bytes[i] & 0x0fU];
-	}
-	text[used] = '\0';
-}
-
 static void rfid_sample_shell_print(const struct shell *sh,
-				  const struct rfid_sample_diagnostic *sample,
-				  bool detailed)
+				  const struct rfid_sample_diagnostic *sample)
 {
 	const struct rfid_sample_tag_record *tag = &sample->tag;
-	char raw_text[RFID_SAMPLE_PROTOCOL_MAX_FRAME_SIZE * 2U + 1U];
-	char time_json[sizeof(tag->device_time) * 2U + 3U] = "null";
-	size_t raw_size = MIN((size_t)tag->frame_size, sizeof(tag->raw_frame));
-	uint64_t now_ms = (uint64_t)k_uptime_get();
-	uint64_t age_ms = (now_ms >= sample->received_ms) ?
-			  now_ms - sample->received_ms : 0U;
 
-	if (!detailed) {
-		shell_print(sh, "{\"uid\":\"%08x\",\"rssi\":%u,\"pc\":%u,"
-			    "\"bat\":%u,\"ant\":%u,\"checksum\":\"unchecked\"}",
-			    (unsigned int)tag->uid, (unsigned int)tag->rssi,
-			    (unsigned int)tag->pc, (unsigned int)tag->battery,
-			    (unsigned int)tag->antenna);
-		return;
-	}
-
-	rfid_sample_shell_hex(tag->raw_frame, raw_size, raw_text, sizeof(raw_text));
-	if (tag->has_device_time) {
-		time_json[0] = '"';
-		rfid_sample_shell_hex(tag->device_time, sizeof(tag->device_time),
-				     time_json + 1, sizeof(time_json) - 2U);
-		time_json[sizeof(time_json) - 2U] = '"';
-		time_json[sizeof(time_json) - 1U] = '\0';
-	}
-	shell_print(sh, "{\"uid\":\"%08x\",\"rssi\":%u,\"pc\":%u,"
-		    "\"bat\":%u,\"ant\":%u,\"addr\":%u,\"ext\":%u,"
-		    "\"age_ms\":%" PRIu64 ",\"time\":%s,\"time_ok\":%s,"
-		    "\"raw\":\"%s\",\"checksum\":\"unchecked\"}",
+	shell_print(sh, "{\"uid\":\"%08x\",\"rssi\":%u,\"bat\":%u}",
 		    (unsigned int)tag->uid, (unsigned int)tag->rssi,
-		    (unsigned int)tag->pc, (unsigned int)tag->battery,
-		    (unsigned int)tag->antenna, (unsigned int)tag->address,
-		    (unsigned int)tag->additional_type, age_ms, time_json,
-		    tag->time_fields_valid ? "true" : "false", raw_text);
+		    (unsigned int)tag->battery);
 }
 
 static void rfid_sample_shell_thread(void *arg1, void *arg2, void *arg3)
@@ -125,8 +98,7 @@ static void rfid_sample_shell_thread(void *arg1, void *arg2, void *arg3)
 		if ((atomic_get(&rfid_sample_shell_enabled) != 0) &&
 		    (item.session == atomic_get(&rfid_sample_shell_session)) &&
 		    (rfid_sample_shell_output != NULL)) {
-			rfid_sample_shell_print(rfid_sample_shell_output, &item.diagnostic,
-						false);
+			rfid_sample_shell_print(rfid_sample_shell_output, &item.diagnostic);
 		}
 		k_mutex_unlock(&rfid_sample_shell_lock);
 	}
@@ -192,7 +164,29 @@ static int rfid_sample_shell_show(const struct shell *sh)
 	} else if (sample.sequence == 0U) {
 		shell_print(sh, "{\"tag\":null}");
 	} else {
-		rfid_sample_shell_print(sh, &sample, true);
+		rfid_sample_shell_print(sh, &sample);
+	}
+	k_mutex_unlock(&rfid_sample_shell_lock);
+	return ret;
+}
+
+static int rfid_sample_shell_raw(const struct shell *sh)
+{
+	struct rfid_sample_diagnostic sample;
+	char raw[RFID_SAMPLE_PROTOCOL_MAX_FRAME_SIZE * 2U + 1U];
+	int ret;
+
+	ret = zbus_chan_read(&rfid_sample_diagnostic_chan, &sample, K_MSEC(50));
+	k_mutex_lock(&rfid_sample_shell_lock, K_FOREVER);
+	if (ret != 0) {
+		shell_print(sh, "{\"error\":%d}", ret);
+	} else if (sample.sequence == 0U) {
+		shell_print(sh, "{\"raw\":null}");
+	} else {
+		rfid_sample_shell_hex(sample.tag.raw_frame, sample.tag.frame_size,
+				     raw, sizeof(raw));
+		shell_print(sh, "{\"raw\":\"%s\",\"len\":%u}", raw,
+			    (unsigned int)sample.tag.frame_size);
 	}
 	k_mutex_unlock(&rfid_sample_shell_lock);
 	return ret;
@@ -301,6 +295,29 @@ static int rfid_sample_shell_baud(const struct shell *sh, const char *text)
 	return rc;
 }
 
+#if defined(CONFIG_RFID_UPLINK)
+static int rfid_sample_shell_uplink_status(const struct shell *sh)
+{
+	struct rfid_uplink_status status = {0};
+
+	rfid_uplink_get_status(&status);
+	k_mutex_lock(&rfid_sample_shell_lock, K_FOREVER);
+	shell_print(sh, "{\"uplink\":true,\"channel\":4,\"period_ms\":%u,"
+		    "\"pending\":%u,\"sent\":%" PRIu32 ",\"empty\":%" PRIu32
+		    ",\"event_drop\":%" PRIu32 ",\"tag_overflow\":%" PRIu32
+		    ",\"deferred\":%" PRIu32 ",\"send_error\":%" PRIu32
+		    ",\"last_error\":%d,\"next_seq\":%u}",
+		    (unsigned int)CONFIG_RFID_UPLINK_PERIOD_MS,
+		    (unsigned int)status.pending_tags, status.windows_sent,
+		    status.empty_windows_sent, status.event_drops,
+		    status.tag_overflows, status.deferred_windows,
+		    status.send_errors, status.last_error,
+		    (unsigned int)status.next_sequence);
+	k_mutex_unlock(&rfid_sample_shell_lock);
+	return 0;
+}
+#endif
+
 static int rfid_sample_shell_command(const struct shell *sh, size_t argc,
 				    char **argv)
 {
@@ -330,9 +347,14 @@ static int rfid_sample_shell_command(const struct shell *sh, size_t argc,
 	    (strcmp(tokens[0], "help") == 0 || strcmp(tokens[0], "-h") == 0 ||
 	     strcmp(tokens[0], "--help") == 0))) {
 		k_mutex_lock(&rfid_sample_shell_lock, K_FOREVER);
-		shell_print(sh, "{\"cmd\":[\"stream on\",\"stream off\",\"sample show\",\"status\","
+		shell_print(sh, "{\"cmd\":[\"stream on\",\"stream off\",\"sample show\","
+			    "\"sample raw\",\"status\","
 			    "\"uart baud 9600|115200\",\"mode get [addr]\","
-			    "\"read start [addr]\",\"read stop [addr]\"]}");
+			    "\"read start [addr]\",\"read stop [addr]\""
+#if defined(CONFIG_RFID_UPLINK)
+			    ",\"uplink status\""
+#endif
+			    "]}");
 		k_mutex_unlock(&rfid_sample_shell_lock);
 		return 0;
 	}
@@ -343,6 +365,10 @@ static int rfid_sample_shell_command(const struct shell *sh, size_t argc,
 	    strcmp(tokens[1], "show") == 0) {
 		return rfid_sample_shell_show(sh);
 	}
+	if (count == 2U && strcmp(tokens[0], "sample") == 0 &&
+	    strcmp(tokens[1], "raw") == 0) {
+		return rfid_sample_shell_raw(sh);
+	}
 	if (count == 2U && strcmp(tokens[0], "stream") == 0) {
 		if (strcmp(tokens[1], "on") == 0) {
 			return rfid_sample_shell_stream(sh, true);
@@ -351,6 +377,12 @@ static int rfid_sample_shell_command(const struct shell *sh, size_t argc,
 			return rfid_sample_shell_stream(sh, false);
 		}
 	}
+#if defined(CONFIG_RFID_UPLINK)
+	if (count == 2U && strcmp(tokens[0], "uplink") == 0 &&
+	    strcmp(tokens[1], "status") == 0) {
+		return rfid_sample_shell_uplink_status(sh);
+	}
+#endif
 	if (count == 3U && strcmp(tokens[0], "uart") == 0 &&
 	    strcmp(tokens[1], "baud") == 0) {
 		return rfid_sample_shell_baud(sh, tokens[2]);

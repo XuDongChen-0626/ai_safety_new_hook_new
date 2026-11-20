@@ -30,6 +30,12 @@ void hook_4g_start(void);
  */
 int hook_4g_send(const uint8_t *data, uint16_t len);
 
+#define HOOK_4G_PUBLISH_MAX_PAYLOAD 574U
+
+/* Publish one complete payload through a configured usr.cn MQTT channel. */
+int hook_4g_publish(uint8_t channel, const uint8_t *payload,
+		    uint16_t payload_len);
+
 /* Send on usr.cn channel 2 (OTA data / progress): adds the "2," prefix. */
 int hook_4g_send_ota(const uint8_t *data, uint16_t len);
 

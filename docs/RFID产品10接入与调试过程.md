@@ -5,7 +5,7 @@
 在 ais_hook 3.0 应用中为产品10（V2硬件）接入RFID读卡器，完成以下最小闭环：
 
 1. MCU通过串口接收RFID模块主动上传的数据；
-2. 解析标签UID、RSSI、PC、电池值和天线号；
+2. 解析标签UID、RSSI（dB）和电池电量等级；
 3. 通过Shell查看运行状态、最新标签和实时标签流；
 4. 支持在运行时将串口波特率切换为9600或115200；
 5. 不引入标签离线判定、8组寄存器管理或其他业务逻辑。
@@ -116,12 +116,12 @@ hook> rfid status
 ```text
 hook> rfid stream on
 {"stream":true}
-{"uid":"11025539","rssi":71,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
-{"uid":"11025542","rssi":56,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
-{"uid":"11025543","rssi":65,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
-{"uid":"11025538","rssi":54,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
-{"uid":"11025540","rssi":66,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
-{"uid":"11025541","rssi":64,"pc":16,"bat":33,"ant":0,"checksum":"unchecked"}
+{"uid":"11025539","rssi":71,"bat":33}
+{"uid":"11025542","rssi":56,"bat":33}
+{"uid":"11025543","rssi":65,"bat":33}
+{"uid":"11025538","rssi":54,"bat":33}
+{"uid":"11025540","rssi":66,"bat":33}
+{"uid":"11025541","rssi":64,"bat":33}
 ```
 
 本次测试至少识别到6张不同标签。实时输出字段含义如下：
@@ -129,11 +129,10 @@ hook> rfid stream on
 | 字段 | 含义 |
 | --- | --- |
 | `uid` | 4字节标签UID，Shell按8位十六进制文本输出 |
-| `rssi` | RFID模块上报的原始RSSI值 |
-| `pc` | 标签PC原始值；示例中的16对应 `0x10` |
-| `bat` | 标签电池原始值；示例中的33对应 `0x21`，协议定义为3.3 V等级 |
-| `ant` | 接收天线或信道编号 |
-| `checksum` | 当前校验状态；`unchecked`表示尚未执行协议校验和验证 |
+| `rssi` | 标签信号强度，单位dB |
+| `bat` | 电池电量等级码；33（`0x21`）表示2.4～3.3V，24（`0x18`）表示低于2.4V；不是百分比或精确电压值 |
+
+Shell保留`bat`原始等级用于底层诊断；A6对外上报不发送该原始值，而是转换为Flags bit0：0表示电量正常，1表示低电量。
 
 ### 5.3 持续接收与工作模式查询
 
@@ -278,6 +277,9 @@ rfid stream off
 # 查看最近一次成功解析的标签
 rfid sample show
 
+# 查看最近一次标签的完整原始帧dump
+rfid sample raw
+
 # 运行时切换串口速率
 rfid uart baud 9600
 rfid uart baud 115200
@@ -294,13 +296,13 @@ rfid mode get
 
 产品10已经完成“RFID串口接收、协议解析、zbus发布和Shell诊断打印”的最小读取闭环。成功配置为UART8、PE1/PE0、9600 8N1。
 
-当前实现仍属于读取与诊断Sample，尚未实现：
+RFID的4G周期上传已经由独立uplink消费者实现，具体格式见《RFID 4G A6上报协议》。当前仍未实现：
 
 - 校验和验证；
 - 标签在线/离线判定；
 - 8组标签寄存器维护；
 - 标签去重和业务状态管理；
-- 标签数据向4G、Modbus或其他业务模块转发；
+- 标签数据向Modbus或其他业务模块转发；
 - 波特率设置持久化。
 
 这些功能应在确认读取链路长期稳定后，根据实际业务需求独立设计，不应耦合进UART传输层或协议解析层。

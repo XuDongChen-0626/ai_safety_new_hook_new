@@ -21,6 +21,8 @@ extern "C" {
 
 #define HOOK_CLOUD_FRAME_MAGIC 0xA5U
 
+uint16_t hook_cloud_crc16_ccitt(const uint8_t *buf, uint32_t len);
+
 /* Command IDs (cloud -> device). */
 #define CMD_ID_LIGHT         0x01U /* LED/sound control            */
 #define CMD_ID_BMS           0x02U /* battery information          */

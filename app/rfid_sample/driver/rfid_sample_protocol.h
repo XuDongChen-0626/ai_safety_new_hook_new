@@ -12,19 +12,20 @@ extern "C" {
 #define RFID_SAMPLE_PROTOCOL_MAX_FRAME_SIZE 25U
 #define RFID_SAMPLE_PROTOCOL_MAX_REQUEST_SIZE 8U
 #define RFID_SAMPLE_PROTOCOL_DEFAULT_FRAME_TIMEOUT_MS 1000U
+#define RFID_SAMPLE_BATTERY_LEVEL_LOW 0x18U
+#define RFID_SAMPLE_BATTERY_LEVEL_NORMAL 0x21U
 
 /*
  * Diagnostic record only: tag checksums are intentionally not verified.
  * The last frame byte is consumed and preserved, but NEVER verified.
  * Neither successful framing nor time_fields_valid authenticates a tag.
- * No year base, millisecond byte order, timezone or RSSI unit is assumed.
+ * No year base, millisecond byte order or timezone is assumed.
  */
 struct rfid_sample_tag_record {
 	uint32_t uid;
 	uint8_t address;
-	uint8_t rssi;
-	uint8_t pc;
-	uint8_t battery;
+	uint8_t rssi;    /* Signal strength in dB. */
+	uint8_t battery; /* RFID_SAMPLE_BATTERY_LEVEL_* raw code. */
 	uint8_t antenna;
 	uint8_t additional_type;
 	uint8_t checksum;

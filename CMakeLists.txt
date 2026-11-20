@@ -32,6 +32,7 @@ add_subdirectory(app/hook_ota)
 add_subdirectory(app/hook_params)
 add_subdirectory(app/log_manage_app)
 add_subdirectory(app/rfid_sample)
+add_subdirectory(app/rfid_uplink)
 
 target_include_directories(app PRIVATE
 	src
@@ -47,6 +48,7 @@ target_include_directories(app PRIVATE
 	app/hook_health
 	app/hook_ota
 	app/hook_params
+	app/rfid_uplink
 )
 
 target_sources(app PRIVATE

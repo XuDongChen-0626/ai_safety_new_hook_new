@@ -188,27 +188,31 @@ int hook_4g_send(const uint8_t *data, uint16_t len)
 	return hook_4g_send_raw(data, len);
 }
 
+int hook_4g_publish(uint8_t channel, const uint8_t *payload,
+		    uint16_t payload_len)
+{
+	uint8_t frame[HOOK_4G_UART_TX_MAX_FRAME];
+
+	if (channel == 0U || channel > 9U || payload == NULL || payload_len == 0U) {
+		return -EINVAL;
+	}
+	if (payload_len > HOOK_4G_PUBLISH_MAX_PAYLOAD) {
+		return -EMSGSIZE;
+	}
+
+	frame[0] = (uint8_t)('0' + channel);
+	frame[1] = ',';
+	memcpy(&frame[2], payload, payload_len);
+	return hook_4g_send(frame, (uint16_t)(payload_len + 2U));
+}
+
 int hook_4g_send_ota(const uint8_t *data, uint16_t len)
 {
-	uint8_t frame[2U + 64U];
-	int ret;
-
-	if ((data == NULL) || (len == 0U) || (len > (sizeof(frame) - 2U))) {
+	if ((data == NULL) || (len == 0U) || (len > 64U)) {
 		return -1;
 	}
 
-	if (hook_4g_http_mode) {
-		return -EBUSY;
-	}
-
-	/* Prefix and payload must leave the MCU in one usr.cn frame. */
-	frame[0] = '2';
-	frame[1] = ',';
-	memcpy(&frame[2], data, len);
-
-	ret = hook_4g_send_raw(frame, (uint16_t)(len + 2U));
-
-	return ret;
+	return hook_4g_publish(2U, data, len);
 }
 
 int hook_4g_http_trigger(const char *host, uint16_t port)
@@ -284,8 +288,6 @@ static int32_t hook_4g_recv_callback(uint8_t *buf, uint16_t len)
 
 static int32_t hook_4g_mqtt_reply(const uint8_t *buf, uint16_t len)
 {
-	static const uint8_t prefix[] = "1,";
-	uint8_t frame[2U + 512U];
 	uint16_t offset = 0U;
 
 	if ((buf == NULL) || (len == 0U)) {
@@ -301,13 +303,10 @@ static int32_t hook_4g_mqtt_reply(const uint8_t *buf, uint16_t len)
 	while (offset < len) {
 		uint16_t chunk = (uint16_t)(len - offset);
 
-		if (chunk > (sizeof(frame) - 2U)) {
-			chunk = (uint16_t)(sizeof(frame) - 2U);
+		if (chunk > 512U) {
+			chunk = 512U;
 		}
-
-		memcpy(frame, prefix, 2U);
-		memcpy(&frame[2], &buf[offset], chunk);
-		(void)hook_4g_send(frame, (uint16_t)(chunk + 2U));
+		(void)hook_4g_publish(1U, &buf[offset], chunk);
 
 		offset = (uint16_t)(offset + chunk);
 	}

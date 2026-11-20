@@ -33,6 +33,7 @@
 #include "hook_4g.h"
 #include "hook_heartbeat.h"
 #include "hook_params.h"
+#include "device_identity_service.h"
 #include "device_param_server.h"
 #include "offline_log_service.h"
 
@@ -93,6 +94,7 @@ LOG_MODULE_REGISTER(hook_4g_cfg, CONFIG_LOG_DEFAULT_LEVEL);
 /* Fixed by the cloud protocol (AISatefy-Hook-MQTT通信协议-v2.0.0). */
 #define CFG_TOPIC_PREFIX      "ai_safety"
 #define CFG_CID_SUFFIX        "-hook"
+#define CFG_CID_SHORT_ID_SEP  "-"
 #define CFG_WKMOD             "MQTT,NOR"
 #define CFG_UARTFT            "20"
 #define CFG_MQTTMOD           "1"
@@ -123,7 +125,9 @@ struct cfg_entry {
 static struct cfg_entry cfg_entries[CFG_ENTRY_MAX];
 static size_t cfg_entry_count;
 static char cfg_dev[CFG_DEV_MAX];
-static char cfg_cid[CFG_DEV_MAX + sizeof(CFG_CID_SUFFIX)];
+static char cfg_cid[CFG_DEV_MAX + sizeof(CFG_CID_SUFFIX) +
+		    sizeof(CFG_CID_SHORT_ID_SEP) +
+		    MAX(DEVICE_IDENTITY_SHORT_ID_SIZE, sizeof("unknown"))];
 static volatile enum hook_4g_cfg_state cfg_state;
 static K_MUTEX_DEFINE(cfg_mutex);
 
@@ -278,6 +282,9 @@ static void cfg_build(void)
 		"system/hook/server",
 		"ota/hook/server",
 		"inform/hook/device_manager",
+#if defined(CONFIG_RFID_UPLINK)
+		"rfid/hook/server",
+#endif
 	};
 	static const char *const sub_tail[] = {
 		"system/server/hook",
@@ -288,14 +295,17 @@ static void cfg_build(void)
 	char cmd[CFG_CMD_MAX];
 	char expect[CFG_EXPECT_MAX];
 	const char *device_no = hook_params_device_no();
+	const char *short_id = device_identity_get_short_id();
 
 	cfg_entry_count = 0U;
 
 	/* device.no defaults to the hardware short id, so dev is never empty. */
 	(void)snprintk(cfg_dev, sizeof(cfg_dev), "ais%s",
 		       (device_no[0] != '\0') ? device_no : "unknown");
-	(void)snprintk(cfg_cid, sizeof(cfg_cid), "%s%s", cfg_dev,
-		       CFG_CID_SUFFIX);
+	(void)snprintk(cfg_cid, sizeof(cfg_cid), "%s%s%s%s", cfg_dev,
+		       CFG_CID_SUFFIX, CFG_CID_SHORT_ID_SEP,
+		       ((short_id != NULL) && (short_id[0] != '\0')) ? short_id :
+								       "unknown");
 
 	(void)snprintk(cmd, sizeof(cmd), "AT+WKMOD=%s", CFG_WKMOD);
 	/* Some module builds answer plain "MQTT", which is accepted as the
@@ -394,7 +404,11 @@ static uint32_t cfg_hash(void)
 		hook_params_mqtt_port(),
 		hook_params_mqtt_user(),
 		hook_params_mqtt_password(),
+#if defined(CONFIG_RFID_UPLINK)
+		"v2-rfid",
+#else
 		"v1",
+#endif
 	};
 	uint32_t hash = 2166136261U;
 

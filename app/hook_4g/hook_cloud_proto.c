@@ -41,7 +41,7 @@ typedef struct {
 static hook_cloud_parser_t hook_cloud_parser;
 static uint8_t hook_cloud_request_seq;
 
-static uint16_t hook_cloud_crc16_ccitt(const uint8_t *buf, uint32_t len)
+uint16_t hook_cloud_crc16_ccitt(const uint8_t *buf, uint32_t len)
 {
 	uint16_t crc = 0U;
 
@@ -62,16 +62,10 @@ static uint16_t hook_cloud_crc16_ccitt(const uint8_t *buf, uint32_t len)
 static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 				uint8_t payload_len)
 {
-	uint8_t tx_buf[8U + HOOK_CLOUD_DATA_MAX];
+	uint8_t tx_buf[6U + HOOK_CLOUD_DATA_MAX];
 	uint16_t idx = 0U;
-	uint16_t frame_start;
 	uint16_t crc;
 
-	/* Everything the device reports to the cloud uses channel 3. */
-	tx_buf[idx++] = '3';
-	tx_buf[idx++] = ',';
-
-	frame_start = idx;
 	tx_buf[idx++] = HOOK_CLOUD_FRAME_MAGIC;
 	/* Echo the request SEQ so the cloud can pair this response with the
 	 * exact request even when several commands are in flight.
@@ -85,7 +79,7 @@ static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 		idx += payload_len;
 	}
 
-	crc = hook_cloud_crc16_ccitt(&tx_buf[frame_start], idx - frame_start);
+	crc = hook_cloud_crc16_ccitt(tx_buf, idx);
 	tx_buf[idx++] = (uint8_t)(crc & 0xFFU);
 	tx_buf[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
 
@@ -95,7 +89,7 @@ static void hook_cloud_send_ack(uint8_t ack_id, const uint8_t *payload,
 	 * frame into the HTTP request the module is building (observed on the
 	 * bench as "GET /s/xxx3,\xA5g... HTTP/1.1" on the server).
 	 */
-	(void)hook_4g_send(tx_buf, idx);
+	(void)hook_4g_publish(3U, tx_buf, idx);
 }
 
 static void hook_cloud_put_u16(uint8_t *dst, uint16_t value)

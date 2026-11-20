@@ -39,8 +39,8 @@ static int hook_param_changed(const char *key, const char *value, void *user_dat
 }
 
 /*
- * Not const: the device.no default is the hardware derived short id, which is
- * only known at run time (filled in by hook_params_init()).
+ * Not const: device.no can default to the product value or to the hardware
+ * derived short id selected at run time by hook_params_init().
  */
 static struct device_param_desc hook_param_table[] = {
 	{
@@ -213,7 +213,8 @@ void hook_params_refresh(void)
 	 * the default of device.no, but a failed read must not leave the device
 	 * without a tag.
 	 */
-	short_id = device_identity_get_short_id();
+	short_id = (CONFIG_HOOK_DEFAULT_DEVICE_NO[0] != '\0') ?
+		   CONFIG_HOOK_DEFAULT_DEVICE_NO : device_identity_get_short_id();
 	(void)snprintk(hook_param_device_tag, sizeof(hook_param_device_tag), "%s",
 		       (short_id != NULL) ? short_id : "unknown");
 }
@@ -276,11 +277,12 @@ int hook_params_init(void)
 	int ret;
 
 	/*
-	 * device.no defaults to the hardware short id: the factory number is
-	 * optional, and a device that never had one must still be able to build
-	 * its MQTT topics (ai_safety/ais<short_id>/...).
+	 * device.no uses the product default when configured, otherwise it falls
+	 * back to the hardware short id. Either path gives MQTT a non-empty device
+	 * component (ai_safety/ais<device.no>/...).
 	 */
-	short_id = device_identity_get_short_id();
+	short_id = (CONFIG_HOOK_DEFAULT_DEVICE_NO[0] != '\0') ?
+		   CONFIG_HOOK_DEFAULT_DEVICE_NO : device_identity_get_short_id();
 	(void)snprintk(hook_param_device_no_default,
 		       sizeof(hook_param_device_no_default), "%s",
 		       ((short_id != NULL) && (short_id[0] != '\0')) ? short_id :

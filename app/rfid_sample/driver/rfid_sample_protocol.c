@@ -71,7 +71,6 @@ static void rfid_sample_protocol_decode(const uint8_t *frame, size_t frame_size,
 		      ((uint32_t)frame[12] << 8) | (uint32_t)frame[13];
 	record->address = frame[3];
 	record->rssi = frame[7];
-	record->pc = frame[8];
 	record->battery = frame[9];
 	record->antenna = frame[14];
 	record->additional_type = frame[frame_size - 2U];

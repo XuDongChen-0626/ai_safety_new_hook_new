@@ -90,7 +90,6 @@ static void assert_record(const struct rfid_sample_tag_record *record,
 	assert(record->uid == uid);
 	assert(record->address == frame[3]);
 	assert(record->rssi == frame[7]);
-	assert(record->pc == frame[8]);
 	assert(record->battery == frame[9]);
 	assert(record->antenna == frame[14]);
 	assert(record->additional_type == frame[size - 2U]);
